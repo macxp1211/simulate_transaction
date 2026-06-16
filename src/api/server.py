@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from decimal import Decimal
@@ -34,7 +34,8 @@ else:
     app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
 
 # 全局账户、费用模型与引擎管理器
-account = Account()
+# 默认账户附带一定底仓，便于模拟卖出场景；今日买入仍需 settle 后变为可用
+account = Account(initial_position=100000)
 fee_calculator = AShareFeeCalculator()
 engine_manager = MatchingEngineManager(account=account, fee_calculator=fee_calculator)
 
@@ -74,6 +75,12 @@ class TradeQuery(BaseModel):
 
 
 # ─────────── FastAPI App ───────────
+
+
+@app.get("/")
+async def root():
+    """根路径重定向到委托终端页面"""
+    return RedirectResponse(url="/static/index.html")
 
 
 @app.on_event("startup")
