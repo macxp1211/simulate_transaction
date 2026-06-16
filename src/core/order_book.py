@@ -86,6 +86,8 @@ class PriceLevel:
     
     def add(self, order: Order):
         """添加订单到队尾"""
+        if order.remaining_qty <= 0:
+            return
         self.orders.append(order)
         self.total_quantity += order.remaining_qty
     
@@ -269,13 +271,15 @@ class OrderBook:
             level = self.asks[best_ask]
             target_order = level.peek()
             
-            if target_order is None or not target_order.is_active:
+            if target_order is None or not target_order.is_active or target_order.remaining_qty <= 0:
                 level.pop()  # 移除无效订单
                 if level.is_empty():
                     del self.asks[best_ask]
                 continue
             
             fill_qty = min(order.remaining_qty, target_order.remaining_qty)
+            if fill_qty <= 0:
+                continue
             trade_price = best_ask
             
             # 创建成交记录
@@ -319,13 +323,15 @@ class OrderBook:
             level = self.bids[best_bid]
             target_order = level.peek()
             
-            if target_order is None or not target_order.is_active:
+            if target_order is None or not target_order.is_active or target_order.remaining_qty <= 0:
                 level.pop()
                 if level.is_empty():
                     del self.bids[best_bid]
                 continue
             
             fill_qty = min(order.remaining_qty, target_order.remaining_qty)
+            if fill_qty <= 0:
+                continue
             trade_price = best_bid
             
             now = datetime.now()
@@ -484,11 +490,13 @@ class OrderBook:
             for order in level.orders:
                 if remaining <= 0:
                     break
-                if not order.is_active:
+                if not order.is_active or order.remaining_qty <= 0:
                     orders_to_remove.append(order)
                     continue
                 
                 fill_qty = min(order.remaining_qty, remaining)
+                if fill_qty <= 0:
+                    continue
                 now = datetime.now()
                 
                 trade = TradeRecord(
@@ -542,11 +550,13 @@ class OrderBook:
             for order in level.orders:
                 if remaining <= 0:
                     break
-                if not order.is_active:
+                if not order.is_active or order.remaining_qty <= 0:
                     orders_to_remove.append(order)
                     continue
                 
                 fill_qty = min(order.remaining_qty, remaining)
+                if fill_qty <= 0:
+                    continue
                 now = datetime.now()
                 
                 trade = TradeRecord(

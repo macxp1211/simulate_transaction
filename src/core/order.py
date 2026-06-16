@@ -63,6 +63,9 @@ class Order:
     frozen_total: Optional[Decimal] = None  # 买入时冻结的资金总额
     frozen_position_qty: Optional[int] = None  # 卖出时冻结的仓位数量
 
+    # 模拟行情订单标记：不参与真实账户冻结/解冻
+    is_mock: bool = False
+
     # 时间戳
     create_time: datetime = field(default_factory=datetime.now)
     update_time: datetime = field(default_factory=datetime.now)

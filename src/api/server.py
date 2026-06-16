@@ -505,6 +505,7 @@ async def _start_market_feed(symbol: str):
     feed_handlers[symbol] = feed
 
     # 注册模拟委托回调：将 mock 委托放入撮合引擎订单簿
+    # mock 订单仅用于构造盘口/队列，不参与真实账户冻结
     async def on_order(order_data: dict):
         order = Order(
             symbol=order_data["symbol"],
@@ -513,6 +514,7 @@ async def _start_market_feed(symbol: str):
             quantity=order_data["quantity"],
             order_type=OrderType.LIMIT,
             order_id=order_data["order_id"],
+            is_mock=True,
         )
         await engine_manager.place_order(order)
 

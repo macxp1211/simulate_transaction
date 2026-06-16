@@ -125,6 +125,26 @@ class SymbolMatchingEngine:
             order.status = OrderStatus.REJECTED
             return
 
+        # 模拟行情订单不参与真实账户风控与冻结
+        if order.is_mock:
+            status, trades = self.order_book.add_order(order)
+            if status == OrderStatus.FILLED:
+                self._stats["orders_filled"] += 1
+            elif status in (OrderStatus.QUEUED, OrderStatus.PARTIAL):
+                self._stats["orders_queued"] += 1
+            for trade in trades:
+                self._stats["trades_generated"] += 1
+                await self._update_account_on_trade(trade)
+                for cb in self._trade_callbacks:
+                    try:
+                        if asyncio.iscoroutinefunction(cb):
+                            await cb(trade)
+                        else:
+                            cb(trade)
+                    except Exception as e:
+                        print(f"[{self.symbol}] Error in trade callback: {e}")
+            return
+
         # 账户级风控校验（资金/仓位）
         if not self._validate_account_constraints(order):
             return
@@ -204,6 +224,14 @@ class SymbolMatchingEngine:
         trade.fee = fee
 
         order = self.order_book.get_order(trade.order_id)
+
+        # 模拟行情订单的成交只记录 fee/net_amount，不更新真实账户
+        if order and order.is_mock:
+            if trade.side == "buy":
+                trade.net_amount = -(trade.price * Decimal(trade.quantity) + fee)
+            else:
+                trade.net_amount = trade.price * Decimal(trade.quantity) - fee
+            return
 
         if trade.side == "buy":
             trade.net_amount = -(trade.price * Decimal(trade.quantity) + fee)
