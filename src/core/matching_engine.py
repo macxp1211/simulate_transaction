@@ -45,9 +45,10 @@ class SymbolMatchingEngine:
     
     async def start(self):
         """启动撮合循环"""
-        if self._running:
+        if self._running and self._task and not self._task.done():
             return
         self._running = True
+        self._event_queue = asyncio.Queue()
         self._task = asyncio.create_task(self._run_loop())
     
     async def stop(self):
@@ -158,6 +159,8 @@ class SymbolMatchingEngine:
     
     async def place_order(self, order: Order) -> Order:
         """提交委托"""
+        if not self._running or (self._task and self._task.done()):
+            await self.start()
         await self._event_queue.put({"type": "order", "order": order})
         # 等待处理完成（简单轮询）
         for _ in range(100):
@@ -168,16 +171,27 @@ class SymbolMatchingEngine:
     
     async def cancel_order(self, order_id: str) -> Optional[Order]:
         """撤销委托"""
+        if not self._running or (self._task and self._task.done()):
+            await self.start()
         await self._event_queue.put({"type": "cancel", "order_id": order_id})
-        await asyncio.sleep(0.01)  # 给处理时间
+        # 等待处理完成（轮询检查状态）
+        for _ in range(100):
+            order = self.order_book.get_order(order_id)
+            if order and order.status == OrderStatus.CANCELLED:
+                break
+            await asyncio.sleep(0.001)
         return self.order_book.get_order(order_id)
     
     async def process_trade(self, trade_data: dict):
         """处理逐笔成交"""
+        if not self._running or (self._task and self._task.done()):
+            await self.start()
         await self._event_queue.put({"type": "trade", "trade": trade_data})
     
     async def process_quote(self, quote_data: dict):
         """处理盘口快照"""
+        if not self._running or (self._task and self._task.done()):
+            await self.start()
         await self._event_queue.put({"type": "quote", "quote": quote_data})
     
     def get_order(self, order_id: str) -> Optional[Order]:

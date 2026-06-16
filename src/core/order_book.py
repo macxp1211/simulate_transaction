@@ -5,11 +5,17 @@ from bisect import bisect_left, insort
 from datetime import datetime
 import uuid
 
+try:
+    from sortedcontainers import SortedDict
+    HAS_SORTEDCONTAINERS = True
+except ImportError:
+    HAS_SORTEDCONTAINERS = False
+
 from .order import Order, Side, OrderStatus, TradeRecord, OrderType
 
 
 class SimpleSortedDict:
-    """使用 bisect 维护有序键列表的简单有序字典"""
+    """使用 bisect 维护有序键列表的简单有序字典（备用实现）"""
     
     def __init__(self, reverse=False):
         self._keys: List[Decimal] = []
@@ -120,10 +126,15 @@ class OrderBook:
     def __init__(self, symbol: str):
         self.symbol = symbol
         
-        # 买盘: 价格 -> PriceLevel, 按价格降序
-        self.bids = SimpleSortedDict(reverse=True)
-        # 卖盘: 价格 -> PriceLevel, 按价格升序
-        self.asks = SimpleSortedDict(reverse=False)
+        if HAS_SORTEDCONTAINERS:
+            # 使用 sortedcontainers.SortedDict（高性能）
+            # bids 降序：使用负值作为 key，或者直接利用 reversed 参数
+            self.bids = SortedDict(lambda x: -x)  # 按负值排序，实现降序
+            self.asks = SortedDict()  # 升序
+        else:
+            # 回退到 SimpleSortedDict
+            self.bids = SimpleSortedDict(reverse=True)
+            self.asks = SimpleSortedDict(reverse=False)
         
         # 订单索引: order_id -> (side, price, order) 用于 O(1) 定位
         self._order_index: Dict[str, Tuple[Side, Decimal, Order]] = {}
@@ -136,19 +147,41 @@ class OrderBook:
     
     # ─────────── 基本查询 ───────────
     
+    def _is_bids_empty(self) -> bool:
+        if HAS_SORTEDCONTAINERS:
+            return len(self.bids) == 0
+        return self.bids.is_empty()
+    
+    def _is_asks_empty(self) -> bool:
+        if HAS_SORTEDCONTAINERS:
+            return len(self.asks) == 0
+        return self.asks.is_empty()
+    
+    def _get_bid_keys(self):
+        if HAS_SORTEDCONTAINERS:
+            return list(self.bids.keys())
+        return self.bids.keys()
+    
+    def _get_ask_keys(self):
+        if HAS_SORTEDCONTAINERS:
+            return list(self.asks.keys())
+        return self.asks.keys()
+    
     @property
     def best_bid(self) -> Optional[Decimal]:
         """最优买价（最高买价）"""
-        if self.bids.is_empty():
+        if self._is_bids_empty():
             return None
-        return self.bids._keys[-1]  # 降序排列，最后一个最大
+        keys = self._get_bid_keys()
+        return keys[0] if keys else None
     
     @property
     def best_ask(self) -> Optional[Decimal]:
         """最优卖价（最低卖价）"""
-        if self.asks.is_empty():
+        if self._is_asks_empty():
             return None
-        return self.asks._keys[0]  # 升序排列，第一个最小
+        keys = self._get_ask_keys()
+        return keys[0] if keys else None
     
     @property
     def spread(self) -> Optional[Decimal]:
@@ -434,9 +467,9 @@ class OrderBook:
         trades: List[TradeRecord] = []
         remaining = total_qty
         
-        # 从最高价开始遍历（SortedDict默认升序，需要反转）
+        # bids.keys() 已按降序返回（最高价在前），直接遍历
         prices_to_remove = []
-        for price in reversed(self.bids.keys()):
+        for price in self.bids.keys():
             if price < min_price or remaining <= 0:
                 break
             
@@ -492,7 +525,7 @@ class OrderBook:
     def get_snapshot(self, depth: int = 10) -> dict:
         """获取订单簿快照"""
         bids_snapshot = []
-        for price in reversed(self.bids.keys()):
+        for price in self._get_bid_keys():
             level = self.bids[price]
             bids_snapshot.append({
                 "price": str(price),
@@ -503,7 +536,7 @@ class OrderBook:
                 break
         
         asks_snapshot = []
-        for price in self.asks.keys():
+        for price in self._get_ask_keys():
             level = self.asks[price]
             asks_snapshot.append({
                 "price": str(price),

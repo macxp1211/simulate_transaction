@@ -1,10 +1,12 @@
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from decimal import Decimal
 from typing import List, Optional, Dict
 from datetime import datetime
 import asyncio
+import os
 
 from ..core.order import Order, Side, OrderType, OrderStatus
 from ..core.matching_engine import MatchingEngineManager
@@ -12,7 +14,25 @@ from ..data.level2_feed import MockLevel2Feed
 from ..data.market_data import TradeEvent, QuoteEvent
 
 
-# ─────────── Pydantic Models ───────────
+# ─────────── FastAPI App ───────────
+
+app = FastAPI(
+    title="高精度队列模拟撮合系统",
+    description="基于 Level-2 逐笔成交和盘口行情的队列模拟撮合系统",
+    version="1.0.0",
+)
+
+# 挂载静态文件服务（前端页面）
+frontend_dir = os.path.join(os.path.dirname(__file__), "..", "..", "frontend")
+if os.path.exists(frontend_dir):
+    app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
+else:
+    # 如果前端目录不存在，创建一个
+    os.makedirs(frontend_dir, exist_ok=True)
+    app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
+
+# 全局引擎管理器
+engine_manager = MatchingEngineManager()
 
 class OrderRequest(BaseModel):
     symbol: str = Field(..., description="标的代码，如 000001.SZ")

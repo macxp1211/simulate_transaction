@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>高精度队列模拟撮合系统 - 委托终端</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>高精度队列模拟撮合系统</h1>
+            <nav>
+                <a href="/static/index.html" class="active">委托终端</a>
+                <a href="/static/monitor.html">监控面板</a>
+            </nav>
+        </header>
+
+        <div class="main-grid">
+            <!-- 左侧：委托提交 -->
+            <div class="panel order-panel">
+                <h2>委托提交</h2>
+                <form id="orderForm">
+                    <div class="form-group">
+                        <label>标的代码</label>
+                        <input type="text" id="symbol" value="000001.SZ" placeholder="如 000001.SZ">
+                    </div>
+                    <div class="form-group">
+                        <label>买卖方向</label>
+                        <div class="radio-group">
+                            <label class="radio-label buy">
+                                <input type="radio" name="side" value="buy" checked>
+                                <span>买入</span>
+                            </label>
+                            <label class="radio-label sell">
+                                <input type="radio" name="side" value="sell">
+                                <span>卖出</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>委托价格</label>
+                        <input type="number" id="price" value="10.50" step="0.01" placeholder="委托价格">
+                    </div>
+                    <div class="form-group">
+                        <label>委托数量</label>
+                        <input type="number" id="quantity" value="1000" step="100" placeholder="委托数量">
+                    </div>
+                    <div class="form-group">
+                        <label>订单类型</label>
+                        <select id="orderType">
+                            <option value="limit">限价单</option>
+                            <option value="market">市价单</option>
+                        </select>
+                    </div>
+                    <button type="submit" class="btn-submit">提交委托</button>
+                </form>
+                <div id="orderResult" class="result"></div>
+            </div>
+
+            <!-- 中间：订单簿 -->
+            <div class="panel book-panel">
+                <h2>订单簿 <span id="bookSymbol" class="symbol-tag">000001.SZ</span></h2>
+                <div class="book-header">
+                    <button id="refreshBook" class="btn-small">刷新</button>
+                    <input type="text" id="bookSymbolInput" value="000001.SZ" class="symbol-input">
+                </div>
+                <div class="book-content">
+                    <div class="ask-section">
+                        <h3>卖盘</h3>
+                        <table class="book-table">
+                            <thead>
+                                <tr><th>价格</th><th>数量</th><th>笔数</th></tr>
+                            </thead>
+                            <tbody id="askBook"></tbody>
+                        </table>
+                    </div>
+                    <div class="spread-bar">
+                        <span id="spread">--</span>
+                    </div>
+                    <div class="bid-section">
+                        <h3>买盘</h3>
+                        <table class="book-table">
+                            <thead>
+                                <tr><th>价格</th><th>数量</th><th>笔数</th></tr>
+                            </thead>
+                            <tbody id="bidBook"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 右侧：我的订单和成交记录 -->
+            <div class="panel right-panel">
+                <div class="tabs">
+                    <button class="tab-btn active" data-tab="orders">我的订单</button>
+                    <button class="tab-btn" data-tab="trades">成交记录</button>
+                    <button class="tab-btn" data-tab="log">实时日志</button>
+                </div>
+                
+                <div id="ordersTab" class="tab-content active">
+                    <div class="order-list" id="orderList"></div>
+                </div>
+                
+                <div id="tradesTab" class="tab-content">
+                    <div class="trade-list" id="tradeList"></div>
+                </div>
+                
+                <div id="logTab" class="tab-content">
+                    <div class="log-list" id="logList"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
