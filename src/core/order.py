@@ -50,11 +50,19 @@ class Order:
     # 系统自动生成字段
     order_id: str = field(default_factory=lambda: f"ord-{uuid.uuid4().hex[:12]}")
     filled_qty: int = 0
+    cancelled_qty: int = 0
     status: OrderStatus = OrderStatus.PENDING
     
     # 队列信息
     queue_info: Optional[QueueInfo] = None
-    
+
+    # 拒绝原因（当被 REJECTED 时填写）
+    reject_reason: Optional[str] = None
+
+    # 挂单冻结信息（用于账户解冻/成交结算）
+    frozen_total: Optional[Decimal] = None  # 买入时冻结的资金总额
+    frozen_position_qty: Optional[int] = None  # 卖出时冻结的仓位数量
+
     # 时间戳
     create_time: datetime = field(default_factory=datetime.now)
     update_time: datetime = field(default_factory=datetime.now)
@@ -72,8 +80,8 @@ class Order:
     
     @property
     def remaining_qty(self) -> int:
-        """剩余未成交数量"""
-        return self.quantity - self.filled_qty
+        """剩余未成交数量（已扣除成交和撤单）"""
+        return self.quantity - self.filled_qty - self.cancelled_qty
     
     @property
     def is_filled(self) -> bool:
@@ -144,12 +152,16 @@ class Order:
             "price": str(self.price),
             "quantity": self.quantity,
             "filled_qty": self.filled_qty,
+            "cancelled_qty": self.cancelled_qty,
             "remaining_qty": self.remaining_qty,
             "status": self.status.value,
             "order_type": self.order_type.value,
             "create_time": self.create_time.isoformat(),
             "update_time": self.update_time.isoformat(),
         }
+
+        if self.reject_reason:
+            result["reject_reason"] = self.reject_reason
         
         if self.queue_info:
             result["queue_info"] = {
@@ -189,7 +201,9 @@ class TradeRecord:
     trade_time: datetime
     match_source: str = "trade_event"  # trade_event / order_cross
     trigger_trade_id: Optional[str] = None  # 触发的逐笔成交ID
-    
+    fee: Decimal = Decimal("0")  # 该笔成交产生的手续费
+    net_amount: Decimal = Decimal("0")  # 净额（买入为负，卖出为正）
+
     def to_dict(self) -> dict:
         return {
             "trade_id": self.trade_id,
@@ -201,4 +215,6 @@ class TradeRecord:
             "trade_time": self.trade_time.isoformat(),
             "match_source": self.match_source,
             "trigger_trade_id": self.trigger_trade_id,
+            "fee": str(self.fee),
+            "net_amount": str(self.net_amount),
         }

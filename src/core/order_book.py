@@ -94,6 +94,7 @@ class PriceLevel:
         try:
             self.orders.remove(order)
             self.total_quantity -= order.remaining_qty
+            self._update_positions()
             return True
         except ValueError:
             return False
@@ -108,8 +109,29 @@ class PriceLevel:
             return None
         order = self.orders.pop(0)
         self.total_quantity -= order.remaining_qty
+        self._update_positions()
         return order
     
+    def partial_cancel(self, order: Order, qty: int):
+        """对队列中某个订单部分撤单"""
+        if qty <= 0:
+            return
+        cancel_qty = min(qty, order.remaining_qty)
+        order.cancelled_qty += cancel_qty
+        order.update_time = datetime.now()
+        if order.remaining_qty <= 0:
+            order.status = OrderStatus.CANCELLED
+        else:
+            order.status = OrderStatus.PARTIAL
+        self.total_quantity -= cancel_qty
+        self._update_positions()
+
+    def _update_positions(self):
+        """更新当前层级中所有订单的队列位置"""
+        length = len(self.orders)
+        for i, o in enumerate(self.orders, start=1):
+            o.update_queue_position(i, length)
+
     def is_empty(self) -> bool:
         return len(self.orders) == 0
     
@@ -404,7 +426,49 @@ class OrderBook:
             trades.extend(self._consume_bids(trade_price, remaining, trigger_trade_id))
         
         return trades
-    
+
+    def consume_queue_on_cancel(self, price: Decimal, cancel_qty: int, side: str) -> int:
+        """
+        当发生撤单时，从队列中移除相应数量
+
+        按 FIFO 顺序从该价格层级的队首开始移除，直到移除 cancel_qty。
+        这会使得同价位后续订单的排队位置动态前移。
+
+        Returns:
+            实际撤单数量
+        """
+        book = self.bids if side == "buy" else self.asks
+        level = book.get(price)
+        if not level:
+            return 0
+
+        remaining = cancel_qty
+        orders_to_remove = []
+
+        for order in level.orders:
+            if remaining <= 0:
+                break
+            if not order.is_active:
+                orders_to_remove.append(order)
+                continue
+
+            cancel_this = min(order.remaining_qty, remaining)
+            level.partial_cancel(order, cancel_this)
+            remaining -= cancel_this
+
+            if order.remaining_qty <= 0:
+                orders_to_remove.append(order)
+                if order.order_id in self._order_index:
+                    del self._order_index[order.order_id]
+
+        for order in orders_to_remove:
+            level.remove(order)
+
+        if level.is_empty():
+            del book[price]
+
+        return cancel_qty - remaining
+
     def _consume_asks(self, max_price: Decimal, total_qty: int, trigger_trade_id: str) -> List[TradeRecord]:
         """消耗卖方队列，价格 <= max_price"""
         trades: List[TradeRecord] = []

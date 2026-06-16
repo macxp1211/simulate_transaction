@@ -96,16 +96,23 @@ def sample_order_book(sample_symbol) -> OrderBook:
 
 
 @pytest.fixture
-def matching_engine(sample_symbol) -> SymbolMatchingEngine:
+def matching_engine(sample_symbol, funded_account) -> SymbolMatchingEngine:
     """单标的撮合引擎"""
-    engine = SymbolMatchingEngine(sample_symbol)
+    engine = SymbolMatchingEngine(sample_symbol, account=funded_account)
     return engine
 
 
 @pytest.fixture
-def engine_manager() -> MatchingEngineManager:
+def engine_manager(funded_account) -> MatchingEngineManager:
     """多标的引擎管理器"""
-    return MatchingEngineManager()
+    return MatchingEngineManager(account=funded_account)
+
+
+@pytest.fixture
+def funded_account() -> "Account":
+    """带有充足资金和底仓的测试账户"""
+    from src.core.account import Account
+    return Account(initial_cash="100000000.00", initial_position=100000)
 
 
 @pytest.fixture

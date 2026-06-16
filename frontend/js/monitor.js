@@ -3,6 +3,7 @@ const WS_URL = `ws://${window.location.host}/ws/v1`;
 
 let ws = null;
 let logs = [];
+let currentSymbol = '000001.SZ';
 
 function log(msg, type = 'info') {
     const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
@@ -77,6 +78,80 @@ async function refreshCrossStats() {
     }
 }
 
+async function refreshOrderBook(symbol) {
+    symbol = symbol || currentSymbol;
+    currentSymbol = symbol;
+    const bookSymbolEl = document.getElementById('bookSymbol');
+    if (bookSymbolEl) bookSymbolEl.textContent = symbol;
+
+    const input = document.getElementById('bookSymbolInput');
+    if (input) input.value = symbol;
+
+    try {
+        const data = await apiGet(`/api/v1/orderbook/${symbol}?depth=10`);
+        if (data.code !== 0) return;
+        const book = data.data;
+
+        const askEl = document.getElementById('askBook');
+        const bidEl = document.getElementById('bidBook');
+        const spreadEl = document.getElementById('spread');
+
+        if (askEl) {
+            askEl.innerHTML = (book.asks || []).slice().reverse().map(a =>
+                `<tr><td>${a.price}</td><td>${a.total_quantity}</td><td>${a.order_count}</td></tr>`
+            ).join('') || '<tr><td colspan="3" style="color:#999">无卖盘</td></tr>';
+        }
+        if (bidEl) {
+            bidEl.innerHTML = (book.bids || []).map(b =>
+                `<tr><td>${b.price}</td><td>${b.total_quantity}</td><td>${b.order_count}</td></tr>`
+            ).join('') || '<tr><td colspan="3" style="color:#999">无买盘</td></tr>';
+        }
+        if (spreadEl) {
+            spreadEl.textContent = book.spread ? `价差: ${book.spread}` : '价差: --';
+        }
+    } catch (err) {
+        console.error('刷新订单簿失败', err);
+    }
+}
+
+function renderQuoteBook(quote) {
+    const symbol = quote.symbol || currentSymbol;
+    currentSymbol = symbol;
+
+    const bookSymbolEl = document.getElementById('bookSymbol');
+    if (bookSymbolEl) bookSymbolEl.textContent = symbol;
+
+    const input = document.getElementById('bookSymbolInput');
+    if (input) input.value = symbol;
+
+    const askEl = document.getElementById('askBook');
+    const bidEl = document.getElementById('bidBook');
+    const spreadEl = document.getElementById('spread');
+
+    const asks = quote.asks || [];
+    const bids = quote.bids || [];
+
+    if (askEl) {
+        askEl.innerHTML = asks.slice().reverse().map(a =>
+            `<tr><td>${a.price}</td><td>${a.total_quantity}</td><td>${a.order_count}</td></tr>`
+        ).join('') || '<tr><td colspan="3" style="color:#999">无卖盘</td></tr>';
+    }
+    if (bidEl) {
+        bidEl.innerHTML = bids.map(b =>
+            `<tr><td>${b.price}</td><td>${b.total_quantity}</td><td>${b.order_count}</td></tr>`
+        ).join('') || '<tr><td colspan="3" style="color:#999">无买盘</td></tr>';
+    }
+    if (spreadEl) {
+        const bestAsk = asks.length > 0 ? parseFloat(asks[0].price) : null;
+        const bestBid = bids.length > 0 ? parseFloat(bids[0].price) : null;
+        if (bestAsk !== null && bestBid !== null) {
+            spreadEl.textContent = `价差: ${(bestAsk - bestBid).toFixed(2)}`;
+        } else {
+            spreadEl.textContent = '价差: --';
+        }
+    }
+}
+
 function connectWebSocket() {
     try {
         ws = new WebSocket(WS_URL);
@@ -87,7 +162,14 @@ function connectWebSocket() {
         ws.onmessage = (event) => {
             const msg = JSON.parse(event.data);
             if (msg.type === 'trade') {
-                log(`成交: ${msg.symbol} ${msg.price} x ${msg.quantity} [${msg.direction}]`);
+                log(`成交: ${msg.symbol} ${msg.price} x ${msg.quantity} [${msg.side}]`);
+                refreshStats();
+                refreshCrossStats();
+            } else if (msg.type === 'quote') {
+                currentSymbol = msg.symbol || currentSymbol;
+                renderQuoteBook(msg);
+                refreshStats();
+                refreshCrossStats();
             }
         };
         ws.onclose = () => {
@@ -104,8 +186,24 @@ function connectWebSocket() {
 document.addEventListener('DOMContentLoaded', () => {
     refreshStats();
     refreshCrossStats();
+    refreshOrderBook(currentSymbol);
     connectWebSocket();
-    
+
+    const refreshBtn = document.getElementById('refreshBook');
+    if (refreshBtn) refreshBtn.addEventListener('click', () => refreshOrderBook(currentSymbol));
+
+    const symbolInput = document.getElementById('bookSymbolInput');
+    if (symbolInput) {
+        symbolInput.addEventListener('change', (e) => {
+            currentSymbol = e.target.value.trim() || '000001.SZ';
+            refreshOrderBook(currentSymbol);
+            // 重新订阅新标的行情
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ action: 'subscribe', channel: 'market', symbols: [currentSymbol] }));
+            }
+        });
+    }
+
     setInterval(() => {
         refreshStats();
         refreshCrossStats();

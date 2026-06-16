@@ -37,6 +37,16 @@ header {
 
 header h1 { font-size: 20px; font-weight: 600; }
 
+.account-bar {
+    font-size: 13px;
+    color: var(--text-secondary);
+    background: var(--bg-primary);
+    padding: 8px 16px;
+    border-radius: var(--radius);
+}
+
+.account-bar span { color: var(--text-primary); font-weight: 600; margin: 0 4px; }
+
 nav a {
     color: var(--text-secondary);
     text-decoration: none;

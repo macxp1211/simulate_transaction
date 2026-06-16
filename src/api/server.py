@@ -10,6 +10,8 @@ import os
 
 from ..core.order import Order, Side, OrderType, OrderStatus
 from ..core.matching_engine import MatchingEngineManager
+from ..core.account import Account
+from ..core.fee import AShareFeeCalculator
 from ..data.level2_feed import MockLevel2Feed
 from ..data.market_data import TradeEvent, QuoteEvent
 
@@ -31,8 +33,16 @@ else:
     os.makedirs(frontend_dir, exist_ok=True)
     app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
 
-# 全局引擎管理器
-engine_manager = MatchingEngineManager()
+# 全局账户、费用模型与引擎管理器
+account = Account()
+fee_calculator = AShareFeeCalculator()
+engine_manager = MatchingEngineManager(account=account, fee_calculator=fee_calculator)
+
+# 行情源（模拟）
+feed_handlers: Dict[str, MockLevel2Feed] = {}
+
+# 行情订阅者：symbol -> set(client_id)
+market_subscribers: Dict[str, set] = {}
 
 class OrderRequest(BaseModel):
     symbol: str = Field(..., description="标的代码，如 000001.SZ")
@@ -65,23 +75,34 @@ class TradeQuery(BaseModel):
 
 # ─────────── FastAPI App ───────────
 
-app = FastAPI(
-    title="高精度队列模拟撮合系统",
-    description="基于 Level-2 逐笔成交和盘口行情的队列模拟撮合系统",
-    version="1.0.0",
-)
-
-# 全局引擎管理器
-engine_manager = MatchingEngineManager()
-
-# 行情源（模拟）
-feed_handlers: Dict[str, MockLevel2Feed] = {}
-
 
 @app.on_event("startup")
 async def startup_event():
     """启动事件"""
     print("撮合系统启动中...")
+
+    # 注册全局成交回调：撮合引擎产生成交后广播给对应标的的订阅者
+    async def on_trade_generated(trade):
+        await _broadcast_trade(trade)
+
+    engine_manager.on_trade_generated(on_trade_generated)
+
+    # 启动默认标的的模拟行情源，使系统即使没有 WebSocket 订阅也具备流动性
+    await _start_market_feed("000001.SZ")
+    # 启动盘口快照广播任务（无订阅者时会自动退出）
+    if "000001.SZ" not in quote_broadcast_tasks or quote_broadcast_tasks["000001.SZ"].done():
+        quote_broadcast_tasks["000001.SZ"] = asyncio.create_task(_quote_broadcast_loop("000001.SZ"))
+
+
+async def _broadcast_trade(trade):
+    """将成交广播给订阅了该标的的所有客户端"""
+    message = {"type": "trade", **trade.to_dict()}
+    for cid in list(market_subscribers.get(trade.symbol, set())):
+        await ws_manager.send_to(cid, message)
+
+
+# 标的 -> 盘口快照广播任务
+quote_broadcast_tasks: Dict[str, asyncio.Task] = {}
 
 
 @app.on_event("shutdown")
@@ -112,7 +133,11 @@ async def create_order(req: OrderRequest):
         )
         
         result = await engine_manager.place_order(order)
-        
+
+        if result.status == OrderStatus.REJECTED:
+            detail = result.reject_reason or "委托被拒绝"
+            raise HTTPException(status_code=400, detail=detail)
+
         return OrderResponse(
             code=0,
             message="success",
@@ -120,6 +145,8 @@ async def create_order(req: OrderRequest):
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -263,6 +290,9 @@ async def list_trades(
             except:
                 pass
         
+        # 按成交时间倒序，最新成交在前
+        trades.sort(key=lambda t: t.trade_time, reverse=True)
+        
         # 分页
         total = len(trades)
         start = (page - 1) * page_size
@@ -331,11 +361,50 @@ async def get_stats(symbol: str):
         engine = engine_manager.get_all_engines().get(symbol)
         if engine is None:
             raise HTTPException(status_code=404, detail="Symbol not found")
-        
+
         return OrderResponse(
             code=0,
             message="success",
             data=engine.get_stats(),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/account", response_model=OrderResponse)
+async def get_account():
+    """查询账户快照"""
+    try:
+        acc = engine_manager.get_account()
+        if acc is None:
+            raise HTTPException(status_code=404, detail="Account not found")
+
+        return OrderResponse(
+            code=0,
+            message="success",
+            data=acc.to_dict(),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/account/settle", response_model=OrderResponse)
+async def settle_account():
+    """日终结算：将今日买入的冻结仓位转为可用仓位"""
+    try:
+        acc = engine_manager.get_account()
+        if acc is None:
+            raise HTTPException(status_code=404, detail="Account not found")
+
+        acc.settle()
+        return OrderResponse(
+            code=0,
+            message="success",
+            data=acc.to_dict(),
         )
     except HTTPException:
         raise
@@ -397,32 +466,89 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_json({"type": "pong", "timestamp": datetime.now().isoformat()})
     
     except WebSocketDisconnect:
+        _unsubscribe_market(client_id)
         ws_manager.disconnect(client_id)
     except Exception as e:
+        _unsubscribe_market(client_id)
         ws_manager.disconnect(client_id)
+
+
+def _unsubscribe_market(client_id: str):
+    """客户端断开时清理行情订阅"""
+    for symbol in list(market_subscribers.keys()):
+        subscribers = market_subscribers[symbol]
+        subscribers.discard(client_id)
+        if not subscribers:
+            market_subscribers.pop(symbol, None)
+            feed = feed_handlers.pop(symbol, None)
+            if feed:
+                asyncio.create_task(feed.stop())
+
+
+async def _start_market_feed(symbol: str):
+    """启动指定标的的模拟行情源"""
+    if symbol in feed_handlers:
+        return
+
+    def book_provider():
+        engine = engine_manager.get_all_engines().get(symbol)
+        return engine.get_orderbook_snapshot(depth=5) if engine else None
+
+    feed = MockLevel2Feed(symbol=symbol, book_provider=book_provider)
+    feed_handlers[symbol] = feed
+
+    # 注册模拟委托回调：将 mock 委托放入撮合引擎订单簿
+    async def on_order(order_data: dict):
+        order = Order(
+            symbol=order_data["symbol"],
+            side=Side(order_data["side"]),
+            price=Decimal(order_data["price"]),
+            quantity=order_data["quantity"],
+            order_type=OrderType.LIMIT,
+            order_id=order_data["order_id"],
+        )
+        await engine_manager.place_order(order)
+
+    feed.on_order(on_order)
+
+    # 注册行情撤单回调：将 mock 撤单事件交给撮合引擎处理队列消耗
+    async def on_cancel(cancel_data: dict):
+        await engine_manager.process_cancel_feed(symbol, cancel_data)
+
+    feed.on_cancel(on_cancel)
+    await feed.start()
+
+    # 启动该标的的盘口快照广播任务
+    if symbol not in quote_broadcast_tasks or quote_broadcast_tasks[symbol].done():
+        quote_broadcast_tasks[symbol] = asyncio.create_task(_quote_broadcast_loop(symbol))
 
 
 async def _subscribe_market(symbol: str, client_id: str):
     """订阅行情推送"""
-    if symbol not in feed_handlers:
-        feed = MockLevel2Feed(symbol=symbol)
-        feed_handlers[symbol] = feed
-        
-        # 注册回调
-        async def on_trade(trade: TradeEvent):
-            await engine_manager.process_trade(trade.symbol, trade.to_dict())
-            await ws_manager.send_to(client_id, {
-                "type": "trade",
-                **trade.to_dict(),
-            })
-        
-        async def on_quote(quote: QuoteEvent):
-            await engine_manager.process_quote(quote.symbol, quote.to_dict())
-            await ws_manager.send_to(client_id, {
-                "type": "quote",
-                **quote.to_dict(),
-            })
-        
-        feed.on_trade(on_trade)
-        feed.on_quote(on_quote)
-        await feed.start()
+    subscribers = market_subscribers.setdefault(symbol, set())
+    subscribers.add(client_id)
+
+    await _start_market_feed(symbol)
+
+
+async def _quote_broadcast_loop(symbol: str):
+    """定期从引擎订单簿生成盘口快照并广播"""
+    while True:
+        try:
+            subscribers = market_subscribers.get(symbol, set())
+            if not subscribers:
+                break
+
+            engine = engine_manager.get_all_engines().get(symbol)
+            if engine:
+                snapshot = engine.get_orderbook_snapshot(depth=5)
+                message = {"type": "quote", **snapshot}
+                for cid in list(subscribers):
+                    await ws_manager.send_to(cid, message)
+
+            await asyncio.sleep(1.0)
+        except Exception as e:
+            print(f"[{symbol}] Quote broadcast error: {e}")
+            await asyncio.sleep(1.0)
+
+    quote_broadcast_tasks.pop(symbol, None)

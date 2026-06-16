@@ -4,6 +4,7 @@ const WS_URL = `ws://${window.location.host}/ws/v1`;
 let ws = null;
 let myOrders = [];
 let logs = [];
+let currentBookSymbol = '000001.SZ';
 
 function log(msg, type = 'info') {
     const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
@@ -126,11 +127,80 @@ function renderTrades(trades) {
         el.innerHTML = '<div class="trade-item">暂无成交</div>';
         return;
     }
-    el.innerHTML = trades.map(t => `<div class="trade-item">
-        <span class="trade-price">${t.price}</span> x <span class="trade-qty">${t.quantity}</span> 
-        <span style="color:#999">${t.side === 'buy' ? '买入' : '卖出'} ${t.symbol}</span>
-        <span style="float:right;color:#999;font-size:11px">${t.trade_time?.slice(11,19) || ''}</span>
-    </div>`).join('');
+    const myOrderIds = new Set(myOrders.map(o => o.order_id));
+    el.innerHTML = trades.map(t => {
+        const isMine = myOrderIds.has(t.order_id);
+        const mineTag = isMine ? '<span style="color:#ff9800;font-size:11px;margin-left:4px">[我的]</span>' : '';
+        const sourceTag = t.match_source === 'order_cross'
+            ? '<span style="color:#999;font-size:11px;margin-left:4px">撮合</span>'
+            : '<span style="color:#999;font-size:11px;margin-left:4px">行情</span>';
+        return `<div class="trade-item">
+            <span class="trade-price">${t.price}</span> x <span class="trade-qty">${t.quantity}</span>
+            <span style="color:#999">${t.side === 'buy' ? '买入' : '卖出'} ${t.symbol}</span>
+            ${mineTag}${sourceTag}
+            <span style="float:right;color:#999;font-size:11px">${t.trade_time?.slice(11,19) || ''}</span>
+        </div>`;
+    }).join('');
+}
+
+// 刷新成交记录
+async function refreshTrades() {
+    try {
+        const symbol = document.getElementById('bookSymbolInput').value.trim() || currentBookSymbol;
+        const data = await apiGet(`/api/v1/trades?symbol=${symbol}&page_size=50`);
+        if (data.code === 0) {
+            renderTrades(data.data.trades || []);
+        }
+    } catch (err) {
+        console.error('刷新成交记录失败', err);
+    }
+}
+
+// 刷新我的订单状态
+async function refreshMyOrders() {
+    let changed = false;
+    const toRemove = [];
+    for (let i = 0; i < myOrders.length; i++) {
+        const o = myOrders[i];
+        if (o.status === 'filled' || o.status === 'cancelled' || o.status === 'rejected') continue;
+        try {
+            const data = await apiGet(`/api/v1/orders/${o.order_id}`);
+            if (data.code === 0 && data.data) {
+                myOrders[i] = data.data;
+                changed = true;
+            } else if (data.code !== 0) {
+                // 订单不存在或已失效，标记移除
+                toRemove.push(o.order_id);
+            }
+        } catch (err) {
+            console.error('刷新订单状态失败', err);
+        }
+    }
+    if (toRemove.length > 0) {
+        myOrders = myOrders.filter(o => !toRemove.includes(o.order_id));
+        changed = true;
+    }
+    if (changed) renderOrders();
+}
+
+// 刷新账户信息
+async function refreshAccount() {
+    try {
+        const data = await apiGet('/api/v1/account');
+        if (data.code === 0 && data.data) {
+            const acc = data.data;
+            const cashEl = document.getElementById('accountCash');
+            const availEl = document.getElementById('accountAvail');
+            const frozenEl = document.getElementById('accountFrozen');
+            const feesEl = document.getElementById('accountFees');
+            if (cashEl) cashEl.textContent = parseFloat(acc.cash).toFixed(2);
+            if (availEl) availEl.textContent = acc.available_position;
+            if (frozenEl) frozenEl.textContent = acc.frozen_position;
+            if (feesEl) feesEl.textContent = parseFloat(acc.total_fees).toFixed(2);
+        }
+    } catch (err) {
+        console.error('刷新账户信息失败', err);
+    }
 }
 
 // 刷新订单簿
@@ -147,7 +217,7 @@ async function refreshOrderBook() {
         const spreadEl = document.getElementById('spread');
         
         if (askEl) {
-            askEl.innerHTML = (book.asks || []).map(a => 
+            askEl.innerHTML = (book.asks || []).slice().reverse().map(a =>
                 `<tr><td>${a.price}</td><td>${a.total_quantity}</td><td>${a.order_count}</td></tr>`
             ).join('') || '<tr><td colspan="3" style="color:#999">无卖盘</td></tr>';
         }
@@ -164,6 +234,39 @@ async function refreshOrderBook() {
     }
 }
 
+function renderQuoteBook(quote) {
+    const symbol = quote.symbol || currentBookSymbol;
+    currentBookSymbol = symbol;
+    document.getElementById('bookSymbol').textContent = symbol;
+
+    const askEl = document.getElementById('askBook');
+    const bidEl = document.getElementById('bidBook');
+    const spreadEl = document.getElementById('spread');
+
+    const asks = quote.asks || [];
+    const bids = quote.bids || [];
+
+    if (askEl) {
+        askEl.innerHTML = asks.slice().reverse().map(a =>
+            `<tr><td>${a.price}</td><td>${a.total_quantity}</td><td>${a.order_count}</td></tr>`
+        ).join('') || '<tr><td colspan="3" style="color:#999">无卖盘</td></tr>';
+    }
+    if (bidEl) {
+        bidEl.innerHTML = bids.map(b =>
+            `<tr><td>${b.price}</td><td>${b.total_quantity}</td><td>${b.order_count}</td></tr>`
+        ).join('') || '<tr><td colspan="3" style="color:#999">无买盘</td></tr>';
+    }
+    if (spreadEl) {
+        const bestAsk = asks.length > 0 ? parseFloat(asks[0].price) : null;
+        const bestBid = bids.length > 0 ? parseFloat(bids[0].price) : null;
+        if (bestAsk !== null && bestBid !== null) {
+            spreadEl.textContent = `价差: ${(bestAsk - bestBid).toFixed(2)}`;
+        } else {
+            spreadEl.textContent = '价差: --';
+        }
+    }
+}
+
 // WebSocket 连接
 function connectWebSocket() {
     try {
@@ -175,10 +278,14 @@ function connectWebSocket() {
         ws.onmessage = (event) => {
             const msg = JSON.parse(event.data);
             if (msg.type === 'trade') {
-                log(`成交: ${msg.symbol} ${msg.price} x ${msg.quantity} [${msg.direction}]`);
-            } else if (msg.type === 'quote') {
-                // 实时刷新订单簿
+                log(`成交: ${msg.symbol} ${msg.price} x ${msg.quantity} [${msg.side}]`);
+                refreshTrades();
+                refreshMyOrders();
+                refreshAccount();
                 refreshOrderBook();
+            } else if (msg.type === 'quote') {
+                // 实时刷新行情订单簿
+                renderQuoteBook(msg);
             }
         };
         ws.onclose = () => {
@@ -215,10 +322,17 @@ document.addEventListener('DOMContentLoaded', () => {
     if (symbolInput) symbolInput.addEventListener('change', refreshOrderBook);
     
     refreshOrderBook();
+    refreshTrades();
+    refreshAccount();
     connectWebSocket();
-    
+
     // 定时刷新
-    setInterval(refreshOrderBook, 3000);
+    setInterval(() => {
+        refreshOrderBook();
+        refreshTrades();
+        refreshMyOrders();
+        refreshAccount();
+    }, 3000);
 });
 
 window.cancelOrder = cancelOrder;

@@ -5,7 +5,16 @@ from fastapi.testclient import TestClient
 
 from src.core.order import Order, Side, OrderType
 from src.core.matching_engine import MatchingEngineManager
-from src.api.server import app, engine_manager
+from src.api.server import app, engine_manager, account
+
+
+def reset_test_account():
+    """重置测试账户为充足资金和底仓"""
+    account.cash = Decimal("100000000.00")
+    account.available_position = 100000
+    account.frozen_position = 0
+    account.total_fees = Decimal("0")
+    account.trade_count = 0
 
 
 class TestEndToEnd:
@@ -16,8 +25,9 @@ class TestEndToEnd:
         return TestClient(app)
     
     def setup_method(self):
-        """每个测试前重置引擎状态"""
+        """每个测试前重置引擎状态和账户"""
         engine_manager._engines.clear()
+        reset_test_account()
     
     def test_e2e_place_and_match(self, client):
         """端到端：委托→撮合→成交"""

@@ -155,8 +155,8 @@ class TestMatchingEngineManager:
     """多标的引擎管理器测试"""
     
     @pytest.fixture
-    def manager(self):
-        return MatchingEngineManager()
+    def manager(self, funded_account):
+        return MatchingEngineManager(account=funded_account)
     
     @pytest.mark.asyncio
     async def test_create_engine_on_demand(self, manager):
@@ -227,3 +227,59 @@ class TestMatchingEngineManager:
         
         assert found is not None
         assert found.order_id == result.order_id
+
+    @pytest.mark.asyncio
+    async def test_buy_rejected_insufficient_cash(self, manager):
+        """买入因资金不足被拒绝"""
+        # 使用远超账户资金的金额
+        order = Order(
+            symbol="000001.SZ",
+            side=Side.BUY,
+            price=Decimal("999999.99"),
+            quantity=10000,
+        )
+        result = await manager.place_order(order)
+
+        assert result.status == OrderStatus.REJECTED
+        assert "资金不足" in (result.reject_reason or "")
+
+    @pytest.mark.asyncio
+    async def test_sell_rejected_insufficient_position(self, manager):
+        """卖出因可用仓位不足被拒绝"""
+        order = Order(
+            symbol="000001.SZ",
+            side=Side.SELL,
+            price=Decimal("10.50"),
+            quantity=999999900,
+        )
+        result = await manager.place_order(order)
+
+        assert result.status == OrderStatus.REJECTED
+        assert "仓位不足" in (result.reject_reason or "")
+
+    @pytest.mark.asyncio
+    async def test_trade_record_includes_fee(self, manager):
+        """成交记录包含费用"""
+        # 卖单
+        sell = Order(
+            symbol="000001.SZ",
+            side=Side.SELL,
+            price=Decimal("10.50"),
+            quantity=1000,
+        )
+        await manager.place_order(sell)
+
+        # 更高价买单，立即撮合
+        buy = Order(
+            symbol="000001.SZ",
+            side=Side.BUY,
+            price=Decimal("10.51"),
+            quantity=1000,
+        )
+        result = await manager.place_order(buy)
+
+        assert result.status == OrderStatus.FILLED
+        assert len(result.trades) > 0
+        trade = result.trades[0]
+        assert trade.fee > 0
+        assert trade.net_amount < 0  # 买入净额为负
