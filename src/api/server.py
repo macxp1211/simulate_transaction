@@ -116,6 +116,9 @@ class ParticipantConfigRequest(BaseModel):
     stop_loss_trader_count: Optional[int] = None
     order_book_imbalance_count: Optional[int] = None
     iceberg_participant_count: Optional[int] = None
+    directional_trader_count: Optional[int] = None
+    chip_collector_count: Optional[int] = None
+    day_trader_count: Optional[int] = None
 
 class ParticipantConfigResponse(BaseModel):
     code: int = 0
@@ -760,6 +763,12 @@ async def update_participant_config(req: ParticipantConfigRequest):
             config["order_book_imbalance_count"] = req.order_book_imbalance_count
         if req.iceberg_participant_count is not None:
             config["iceberg_participant_count"] = req.iceberg_participant_count
+        if req.directional_trader_count is not None:
+            config["directional_trader_count"] = req.directional_trader_count
+        if req.chip_collector_count is not None:
+            config["chip_collector_count"] = req.chip_collector_count
+        if req.day_trader_count is not None:
+            config["day_trader_count"] = req.day_trader_count
 
         # 同步更新全局配置缓存，确保行情源重建后仍使用用户设置
         cached = participant_config_cache.setdefault(symbol, {})

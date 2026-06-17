@@ -415,6 +415,9 @@ async function loadParticipantConfig() {
             const el9 = document.getElementById('configSLCount');
             const el10 = document.getElementById('configOBICount');
             const el11 = document.getElementById('configICECount');
+            const el12 = document.getElementById('configDIRCount');
+            const el13 = document.getElementById('configCHIPCount');
+            const el14 = document.getElementById('configDAYCount');
             if (el1 && c.target_price) el1.value = c.target_price;
             if (el2 && c.order_interval) el2.value = c.order_interval;
             if (el3 && c.market_maker_count !== undefined) el3.value = c.market_maker_count;
@@ -426,6 +429,9 @@ async function loadParticipantConfig() {
             if (el9 && c.stop_loss_trader_count !== undefined) el9.value = c.stop_loss_trader_count;
             if (el10 && c.order_book_imbalance_count !== undefined) el10.value = c.order_book_imbalance_count;
             if (el11 && c.iceberg_participant_count !== undefined) el11.value = c.iceberg_participant_count;
+            if (el12 && c.directional_trader_count !== undefined) el12.value = c.directional_trader_count;
+            if (el13 && c.chip_collector_count !== undefined) el13.value = c.chip_collector_count;
+            if (el14 && c.day_trader_count !== undefined) el14.value = c.day_trader_count;
         }
     } catch (err) {
         console.error('加载配置失败', err);
@@ -445,6 +451,9 @@ async function applyParticipantConfig() {
     const slCount = parseInt(document.getElementById('configSLCount').value);
     const obiCount = parseInt(document.getElementById('configOBICount').value);
     const iceCount = parseInt(document.getElementById('configICECount').value);
+    const dirCount = parseInt(document.getElementById('configDIRCount').value);
+    const chipCount = parseInt(document.getElementById('configCHIPCount').value);
+    const dayCount = parseInt(document.getElementById('configDAYCount').value);
 
     const body = {
         symbol,
@@ -459,6 +468,9 @@ async function applyParticipantConfig() {
         stop_loss_trader_count: isNaN(slCount) ? undefined : slCount,
         order_book_imbalance_count: isNaN(obiCount) ? undefined : obiCount,
         iceberg_participant_count: isNaN(iceCount) ? undefined : iceCount,
+        directional_trader_count: isNaN(dirCount) ? undefined : dirCount,
+        chip_collector_count: isNaN(chipCount) ? undefined : chipCount,
+        day_trader_count: isNaN(dayCount) ? undefined : dayCount,
     };
 
     try {
