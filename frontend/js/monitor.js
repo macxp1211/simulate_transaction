@@ -19,6 +19,7 @@ function log(msg, type = 'info') {
 
 async function apiGet(path) {
     const res = await fetch(`${API_BASE}${path}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
 }
 
@@ -28,6 +29,7 @@ async function apiPost(path, body) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
     });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
 }
 
@@ -639,7 +641,13 @@ function connectWebSocket() {
             ws.send(JSON.stringify({ action: 'subscribe', channel: 'market', symbols: [currentSymbol] }));
         };
         ws.onmessage = (event) => {
-            const msg = JSON.parse(event.data);
+            let msg;
+            try {
+                msg = JSON.parse(event.data);
+            } catch (e) {
+                console.error('WebSocket 消息解析失败', event.data);
+                return;
+            }
             if (msg.type === 'trade') {
                 log(`成交: ${msg.symbol} ${msg.price} x ${msg.quantity} [${msg.side}]`);
                 tradeStream.push(msg);
@@ -687,9 +695,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const symbolInput = document.getElementById('bookSymbolInput');
     if (symbolInput) {
         symbolInput.addEventListener('change', (e) => {
+            const oldSymbol = currentSymbol;
             currentSymbol = e.target.value.trim() || '000001.SZ';
             refreshOrderBook(currentSymbol);
+            refreshOrderFlow(currentSymbol);
+            refreshDepthChart(currentSymbol);
+            document.getElementById('flowSymbol').textContent = currentSymbol;
+            document.getElementById('depthSymbol').textContent = currentSymbol;
             if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ action: 'unsubscribe', channel: 'market', symbols: [oldSymbol] }));
                 ws.send(JSON.stringify({ action: 'subscribe', channel: 'market', symbols: [currentSymbol] }));
             }
         });

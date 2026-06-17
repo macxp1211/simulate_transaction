@@ -207,7 +207,7 @@ def _notify_participant_filled(order_id: str, trade_info: dict):
     """当参与者生成的 mock 订单成交时，通知对应参与者清理 pending 列表"""
     # order_id 形如 "MM-1-000001"，前缀为 participant_id
     # 先尝试从 feed 的 registry 中查找
-    for feed in feed_handlers.values():
+    for feed in list(feed_handlers.values()):
         participant = feed.registry.get_participant(order_id)
         if participant:
             participant.on_order_filled(order_id, trade_info)
@@ -229,7 +229,7 @@ quote_broadcast_tasks: Dict[str, asyncio.Task] = {}
 async def shutdown_event():
     """关闭事件"""
     print("撮合系统关闭中...")
-    for feed in feed_handlers.values():
+    for feed in list(feed_handlers.values()):
         await feed.stop()
     await engine_manager.shutdown_all()
 
@@ -602,7 +602,8 @@ async def reset_account(req: AccountResetRequest):
         for symbol in list(feed_handlers.keys()):
             await feed_handlers[symbol].stop()
         feed_handlers.clear()
-        market_subscribers.clear()
+        # 保留 market_subscribers，让已连接的客户端继续收到后续行情；
+        # 只清除缓存和 feed，重置账户与引擎状态
 
         acc = engine_manager.get_account()
         return OrderResponse(
@@ -653,7 +654,7 @@ async def get_participants(symbol: Optional[str] = None):
     """获取行情参与者状态和统计"""
     try:
         all_stats = []
-        for sym, feed in feed_handlers.items():
+        for sym, feed in list(feed_handlers.items()):
             if symbol and sym != symbol:
                 continue
             all_stats.extend(feed.participant_stats)
@@ -869,7 +870,7 @@ async def get_participants_pnl(symbol: Optional[str] = None):
     """获取参与者 P&L 排名"""
     try:
         all_stats = []
-        for sym, feed in feed_handlers.items():
+        for sym, feed in list(feed_handlers.items()):
             if symbol and sym != symbol:
                 continue
             all_stats.extend(feed.participant_stats)
@@ -979,7 +980,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     order_ids = data.get("order_ids", [])
                     # 注册订单状态推送
                     pass
-            
+
+            elif action == "unsubscribe":
+                channel = data.get("channel")
+                if channel == "market":
+                    symbols = data.get("symbols", [])
+                    for symbol in symbols:
+                        _unsubscribe_symbol(client_id, symbol)
+
             elif action == "ping":
                 await websocket.send_json({"type": "pong", "timestamp": datetime.now().isoformat()})
     
@@ -994,13 +1002,20 @@ async def websocket_endpoint(websocket: WebSocket):
 def _unsubscribe_market(client_id: str):
     """客户端断开时清理行情订阅"""
     for symbol in list(market_subscribers.keys()):
-        subscribers = market_subscribers[symbol]
-        subscribers.discard(client_id)
-        if not subscribers:
-            market_subscribers.pop(symbol, None)
-            feed = feed_handlers.pop(symbol, None)
-            if feed:
-                asyncio.create_task(feed.stop())
+        _unsubscribe_symbol(client_id, symbol)
+
+
+def _unsubscribe_symbol(client_id: str, symbol: str):
+    """取消订阅某标的行情"""
+    subscribers = market_subscribers.get(symbol)
+    if not subscribers:
+        return
+    subscribers.discard(client_id)
+    if not subscribers:
+        market_subscribers.pop(symbol, None)
+        feed = feed_handlers.pop(symbol, None)
+        if feed:
+            asyncio.create_task(feed.stop())
 
 
 async def _start_market_feed(symbol: str):
