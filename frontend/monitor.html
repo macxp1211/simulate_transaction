@@ -50,6 +50,30 @@
             </div>
         </div>
 
+        <!-- 账户设置面板 -->
+        <div class="chart-container">
+            <h3>账户初始设置</h3>
+            <div class="config-panel">
+                <div class="config-row">
+                    <div class="config-group">
+                        <label>初始现金</label>
+                        <input type="number" id="accountInitialCash" value="1000000.00" step="1000" class="config-input">
+                    </div>
+                    <div class="config-group">
+                        <label>初始可用持仓</label>
+                        <input type="number" id="accountInitialPosition" value="100000" step="100" class="config-input">
+                    </div>
+                </div>
+                <div class="config-actions">
+                    <button id="resetAccountBtn" class="btn-submit">重置账户</button>
+                </div>
+            </div>
+            <div id="accountResetResult" class="result"></div>
+            <div class="account-snapshot" id="accountSnapshot" style="margin-top:12px;font-size:13px;color:#4a5568;">
+                当前账户: 现金 -- | 可用仓 -- | 冻结仓 -- | 今日买入 -- | 累计费用 --
+            </div>
+        </div>
+
         <!-- 参与者配置面板 -->
         <div class="chart-container">
             <h3>行情参与者配置</h3>

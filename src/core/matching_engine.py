@@ -220,46 +220,69 @@ class SymbolMatchingEngine:
         if self.account is None:
             return
 
-        fee = self.fee_calculator.calculate(trade.side, trade.price, trade.quantity)
-        trade.fee = fee
+        # 更新主动方
+        await self._update_account_for_order(
+            trade.order_id, trade.side, trade.price, trade.quantity, trade
+        )
 
-        order = self.order_book.get_order(trade.order_id)
+        # 更新对手方（内部撮合时存在）
+        if trade.counterparty_order_id:
+            counter_side = "sell" if trade.side == "buy" else "buy"
+            await self._update_account_for_order(
+                trade.counterparty_order_id, counter_side, trade.price, trade.quantity, trade,
+                is_counterparty=True,
+            )
+
+    async def _update_account_for_order(
+        self,
+        order_id: str,
+        side: str,
+        price: Decimal,
+        quantity: int,
+        trade: TradeRecord,
+        is_counterparty: bool = False,
+    ):
+        """为成交中的某一方更新账户"""
+        order = self.order_book.get_order(order_id)
 
         # 模拟行情订单的成交只记录 fee/net_amount，不更新真实账户
         if order and order.is_mock:
-            if trade.side == "buy":
-                trade.net_amount = -(trade.price * Decimal(trade.quantity) + fee)
-            else:
-                trade.net_amount = trade.price * Decimal(trade.quantity) - fee
+            if not is_counterparty:
+                fee = self.fee_calculator.calculate(side, price, quantity)
+                trade.fee = fee
+                if side == "buy":
+                    trade.net_amount = -(price * Decimal(quantity) + fee)
+                else:
+                    trade.net_amount = price * Decimal(quantity) - fee
             return
 
-        if trade.side == "buy":
-            trade.net_amount = -(trade.price * Decimal(trade.quantity) + fee)
+        fee = self.fee_calculator.calculate(side, price, quantity)
+        if not is_counterparty:
+            trade.fee = fee
+            if side == "buy":
+                trade.net_amount = -(price * Decimal(quantity) + fee)
+            else:
+                trade.net_amount = price * Decimal(quantity) - fee
+
+        if side == "buy":
             if order and order.frozen_total is not None:
-                # 按成交比例从冻结资金中释放，并结算实际成本
-                ratio = Decimal(trade.quantity) / Decimal(order.quantity)
+                # 按成交比例从冻结资金中结算实际成本
+                ratio = Decimal(quantity) / Decimal(order.quantity)
                 release = (order.frozen_total * ratio).quantize(
                     Decimal("0.01"), rounding="ROUND_HALF_UP"
                 )
                 order.frozen_total -= release
-                self.account.frozen_cash -= release
-                self.account.cash += release
-                self.account.on_buy_fill(trade.quantity, trade.price, fee, release)
+                self.account.on_buy_fill(quantity, price, fee, release)
             else:
-                self.account.on_buy_fill(
-                    trade.quantity,
-                    trade.price,
-                    fee,
-                    trade.price * Decimal(trade.quantity) + fee,
-                )
+                # 立即成交：资金尚未冻结，直接从现金扣除
+                self.account.on_buy_fill(quantity, price, fee)
         else:
-            trade.net_amount = trade.price * Decimal(trade.quantity) - fee
-            if order and order.frozen_position_qty is not None:
-                ratio = trade.quantity / order.quantity
+            from_frozen = bool(order and order.frozen_position_qty is not None)
+            if from_frozen:
+                ratio = quantity / order.quantity
                 release_qty = max(1, int(order.frozen_position_qty * ratio))
                 order.frozen_position_qty -= release_qty
-                self.account.frozen_position -= release_qty
-            self.account.on_sell_fill(trade.quantity, trade.price, fee)
+            self.account.on_sell_fill(quantity, price, fee, from_frozen=from_frozen)
 
     async def _handle_cancel(self, order_id: str):
         """处理撤单"""
@@ -491,7 +514,12 @@ class MatchingEngineManager:
     def get_account(self) -> Optional[Account]:
         """获取关联账户"""
         return self._account
-    
+
+    async def reset_account(self, initial_cash=None, initial_position=None):
+        """重置账户并清空所有引擎，使新配置立即生效"""
+        await self.shutdown_all()
+        self._account.reset(initial_cash, initial_position)
+
     async def shutdown_all(self):
         """关闭所有引擎"""
         for engine in self._engines.values():

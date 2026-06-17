@@ -54,6 +54,9 @@ async def _run_persistence(method, *args):
 # 行情源（模拟）
 feed_handlers: Dict[str, MockLevel2Feed] = {}
 
+# 行情参与者配置缓存，确保行情源重建后仍使用用户设置
+participant_config_cache: Dict[str, Dict] = {}
+
 # 行情订阅者：symbol -> set(client_id)
 market_subscribers: Dict[str, set] = {}
 
@@ -108,6 +111,11 @@ class ParticipantConfigResponse(BaseModel):
     code: int = 0
     message: str = "success"
     data: Optional[dict] = None
+
+
+class AccountResetRequest(BaseModel):
+    initial_cash: Optional[str] = Field(default=None, description="初始现金，如 1000000.00")
+    initial_position: Optional[int] = Field(default=None, description="初始可用持仓")
 
 
 
@@ -573,6 +581,32 @@ async def settle_account():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/v1/account/reset", response_model=OrderResponse)
+async def reset_account(req: AccountResetRequest):
+    """重置账户（可修改初始现金与初始持仓），并清空所有运行中引擎"""
+    try:
+        await engine_manager.reset_account(
+            initial_cash=req.initial_cash,
+            initial_position=req.initial_position,
+        )
+        # 清空持久化缓存的历史数据，避免旧数据干扰新模拟
+        trade_history_cache.clear()
+        price_history_cache.clear()
+        for symbol in list(feed_handlers.keys()):
+            await feed_handlers[symbol].stop()
+        feed_handlers.clear()
+        market_subscribers.clear()
+
+        acc = engine_manager.get_account()
+        return OrderResponse(
+            code=0,
+            message="success",
+            data=acc.to_dict(),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ─────────── 行情与参与者配置 API ───────────
 
 @app.get("/api/v1/market/trade_history", response_model=OrderResponse)
@@ -645,6 +679,10 @@ async def update_participant_config(req: ParticipantConfigRequest):
             config["aggressive_trader_count"] = req.aggressive_trader_count
         if req.order_interval is not None:
             config["order_interval"] = req.order_interval
+
+        # 同步更新全局配置缓存，确保行情源重建后仍使用用户设置
+        cached = participant_config_cache.setdefault(symbol, {})
+        cached.update(config)
 
         feed = feed_handlers.get(symbol)
         if feed is not None:
@@ -798,7 +836,12 @@ async def _start_market_feed(symbol: str):
         engine = engine_manager.get_all_engines().get(symbol)
         return engine.get_orderbook_snapshot(depth=5) if engine else None
 
-    feed = MockLevel2Feed(symbol=symbol, book_provider=book_provider)
+    config = participant_config_cache.get(symbol)
+    feed = MockLevel2Feed(
+        symbol=symbol,
+        book_provider=book_provider,
+        participant_config=config,
+    )
     feed_handlers[symbol] = feed
 
     # 注册模拟委托回调：将 mock 委托放入撮合引擎订单簿

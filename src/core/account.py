@@ -31,6 +31,16 @@ class Account:
     updated_at: datetime = field(default_factory=datetime.now)
 
     def __post_init__(self):
+        self.reset(self.initial_cash, self.initial_position)
+
+    def reset(self, initial_cash: Optional[Decimal] = None, initial_position: Optional[int] = None):
+        """重置账户到初始状态"""
+        if initial_cash is not None:
+            self.initial_cash = Decimal(str(initial_cash)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+        if initial_position is not None:
+            self.initial_position = int(initial_position)
         self.cash = Decimal(str(self.initial_cash)).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_UP
         )
@@ -40,6 +50,7 @@ class Account:
         self.today_bought_position = 0
         self.total_fees = Decimal("0")
         self.trade_count = 0
+        self.updated_at = datetime.now()
 
     # ─────────── 查询 ───────────
 
@@ -93,13 +104,20 @@ class Account:
 
     # ─────────── 成交更新 ───────────
 
-    def on_buy_fill(self, qty: int, price: Decimal, fee: Decimal, total_frozen: Decimal):
-        """买入成交：从冻结资金中扣实际成本，余款退回现金，仓位转入今日买入"""
+    def on_buy_fill(self, qty: int, price: Decimal, fee: Decimal, total_frozen: Optional[Decimal] = None):
+        """买入成交
+
+        - 若 total_frozen 提供：从冻结资金中扣实际成本，余款退回现金。
+        - 若未提供（立即成交）：直接从可用现金扣实际成本。
+        仓位均转入今日买入（T+1 冻结）。
+        """
         actual_cost = price * Decimal(qty) + fee
-        # 释放冻结资金
-        self.frozen_cash -= total_frozen
-        # 退回多余现金
-        self.cash += total_frozen - actual_cost
+        if total_frozen is not None:
+            # 释放冻结资金，退回多余现金
+            self.frozen_cash -= total_frozen
+            self.cash += total_frozen - actual_cost
+        else:
+            self.cash -= actual_cost
         self.cash = self.cash.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         # 仓位进入今日买入（T+1 冻结）
         self.today_bought_position += qty
@@ -107,10 +125,17 @@ class Account:
         self.trade_count += 1
         self.updated_at = datetime.now()
 
-    def on_sell_fill(self, qty: int, price: Decimal, fee: Decimal):
-        """卖出成交：减少卖出冻结仓位，增加现金"""
+    def on_sell_fill(self, qty: int, price: Decimal, fee: Decimal, from_frozen: bool = False):
+        """卖出成交：增加现金，减少仓位
+
+        - from_frozen=True：减少卖出冻结仓位（订单曾排队）。
+        - from_frozen=False：减少可用仓位（立即成交）。
+        """
         revenue = price * Decimal(qty) - fee
-        self.frozen_position -= qty
+        if from_frozen:
+            self.frozen_position -= qty
+        else:
+            self.available_position -= qty
         self.cash += revenue
         self.cash = self.cash.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         self.total_fees += fee

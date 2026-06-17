@@ -263,6 +263,55 @@ function renderTradeStream() {
     el.scrollTop = el.scrollHeight;
 }
 
+// ─────────── 账户设置 ───────────
+async function loadAccountSnapshot() {
+    try {
+        const data = await apiGet('/api/v1/account');
+        if (data.code !== 0) return;
+        const acc = data.data || {};
+        const el = document.getElementById('accountSnapshot');
+        if (el) {
+            el.innerHTML = `当前账户: 现金 ${acc.cash || '--'} | 可用仓 ${acc.available_position ?? '--'} | 冻结仓 ${acc.frozen_position ?? '--'} | 今日买入 ${acc.today_bought_position ?? '--'} | 累计费用 ${acc.total_fees || '--'}`;
+        }
+        const cashInput = document.getElementById('accountInitialCash');
+        const posInput = document.getElementById('accountInitialPosition');
+        if (cashInput && acc.initial_cash) cashInput.value = acc.initial_cash;
+        if (posInput && acc.initial_position !== undefined) posInput.value = acc.initial_position;
+    } catch (err) {
+        console.error('加载账户快照失败', err);
+    }
+}
+
+async function resetAccount() {
+    const initialCash = document.getElementById('accountInitialCash').value;
+    const initialPosition = document.getElementById('accountInitialPosition').value;
+    const body = {
+        initial_cash: initialCash,
+        initial_position: initialPosition === '' ? undefined : parseInt(initialPosition, 10),
+    };
+
+    try {
+        const data = await apiPost('/api/v1/account/reset', body);
+        const resultEl = document.getElementById('accountResetResult');
+        if (data.code === 0) {
+            if (resultEl) {
+                resultEl.textContent = '账户已重置';
+                resultEl.className = 'result success';
+                setTimeout(() => { resultEl.className = 'result'; resultEl.textContent = ''; }, 3000);
+            }
+            await loadAccountSnapshot();
+            log(`账户已重置: 现金 ${data.data.cash}, 初始持仓 ${data.data.initial_position}`);
+        } else {
+            if (resultEl) {
+                resultEl.textContent = data.message || '重置失败';
+                resultEl.className = 'result error';
+            }
+        }
+    } catch (err) {
+        console.error('重置账户失败', err);
+    }
+}
+
 // ─────────── 参与者配置 ───────────
 async function loadParticipantConfig() {
     try {
@@ -398,6 +447,7 @@ document.addEventListener('DOMContentLoaded', () => {
     refreshStats();
     refreshCrossStats();
     refreshOrderBook(currentSymbol);
+    loadAccountSnapshot();
     loadParticipantConfig();
     refreshParticipants();
     connectWebSocket();
@@ -421,6 +471,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const resetBtn = document.getElementById('resetConfigBtn');
     if (resetBtn) resetBtn.addEventListener('click', loadParticipantConfig);
+
+    const resetAccountBtn = document.getElementById('resetAccountBtn');
+    if (resetAccountBtn) resetAccountBtn.addEventListener('click', resetAccount);
 
     const chartSymbolInput = document.getElementById('chartSymbolInput');
     if (chartSymbolInput) {
@@ -462,5 +515,6 @@ document.addEventListener('DOMContentLoaded', () => {
         refreshStats();
         refreshCrossStats();
         refreshParticipants();
+        loadAccountSnapshot();
     }, 3000);
 });

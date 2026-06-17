@@ -293,24 +293,25 @@ class OrderBook:
                 quantity=fill_qty,
                 trade_time=now,
                 match_source="order_cross",
+                counterparty_order_id=target_order.order_id,
             )
             order.trades.append(trade)
             self._trades.append(trade)
             trades.append(trade)
-            
+
             # 更新双方订单
             order.fill(fill_qty, now)
             target_order.fill(fill_qty, now)
-            
+
             # 更新价格层级
             level.total_quantity -= fill_qty
             if target_order.is_filled:
                 level.pop()
                 if level.is_empty():
                     del self.asks[best_ask]
-        
+
         return trades
-    
+
     def _match_sell(self, order: Order) -> List[TradeRecord]:
         """卖出订单撮合"""
         trades: List[TradeRecord] = []
@@ -344,22 +345,23 @@ class OrderBook:
                 quantity=fill_qty,
                 trade_time=now,
                 match_source="order_cross",
+                counterparty_order_id=target_order.order_id,
             )
             order.trades.append(trade)
             self._trades.append(trade)
             trades.append(trade)
-            
+
             order.fill(fill_qty, now)
             target_order.fill(fill_qty, now)
-            
+
             level.total_quantity -= fill_qty
             if target_order.is_filled:
                 level.pop()
                 if level.is_empty():
                     del self.bids[best_bid]
-        
+
         return trades
-    
+
     def _enter_queue(self, order: Order):
         """将订单进入队列"""
         book = self.bids if order.side == Side.BUY else self.asks

@@ -47,7 +47,17 @@ class TestAccount:
     def test_sell_fill(self, account):
         """卖出成交后现金增加、卖出冻结仓位减少"""
         account.on_sell_queued(1000)
-        account.on_sell_fill(1000, Decimal("10.00"), Decimal("15.25"))
+        account.on_sell_fill(1000, Decimal("10.00"), Decimal("15.25"), from_frozen=True)
+
+        assert account.cash == Decimal("1009984.75")
+        assert account.available_position == 9000
+        assert account.frozen_position == 0
+        assert account.total_position == 9000
+        assert account.total_fees == Decimal("15.25")
+
+    def test_sell_fill_immediate(self, account):
+        """卖出立即成交，直接扣减可用仓位"""
+        account.on_sell_fill(1000, Decimal("10.00"), Decimal("15.25"), from_frozen=False)
 
         assert account.cash == Decimal("1009984.75")
         assert account.available_position == 9000

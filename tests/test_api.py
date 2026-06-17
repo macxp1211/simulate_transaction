@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 from decimal import Decimal
 import json
 import asyncio
+import time
 
 from src.api.server import app, engine_manager, account
 
@@ -229,6 +230,24 @@ class TestAPI:
         assert after["today_bought_position"] == 0
         assert after["available_position"] == before["available_position"] + before["today_bought_position"]
 
+    def test_reset_account(self, api_client):
+        """测试重置账户初始现金与持仓"""
+        response = api_client.post("/api/v1/account/reset", json={
+            "initial_cash": "500000.00",
+            "initial_position": 5000,
+        })
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["code"] == 0
+        assert data["data"]["cash"] == "500000.00"
+        assert data["data"]["initial_cash"] == "500000.00"
+        assert data["data"]["available_position"] == 5000
+        assert data["data"]["initial_position"] == 5000
+        assert data["data"]["frozen_cash"] == "0"
+        assert data["data"]["frozen_position"] == 0
+        assert data["data"]["today_bought_position"] == 0
+
     def test_buy_rejected_insufficient_cash(self, api_client):
         """买入因资金不足被 400 拒绝"""
         response = api_client.post("/api/v1/orders", json={
@@ -252,3 +271,56 @@ class TestAPI:
 
         assert response.status_code == 400
         assert "仓位不足" in response.json()["detail"]
+
+    def test_participant_config_persists_after_feed_restart(self, api_client):
+        """参与者配置在行情源重建后仍然保留"""
+        from src.api.server import feed_handlers, market_subscribers
+
+        symbol = "000001.SZ"
+
+        # 连接 WebSocket 启动行情源
+        with api_client.websocket_connect("/ws/v1") as ws:
+            ws.send_json({"action": "subscribe", "channel": "market", "symbols": [symbol]})
+            # 等待行情源启动
+            for _ in range(50):
+                if symbol in feed_handlers:
+                    break
+                time.sleep(0.01)
+            assert symbol in feed_handlers
+
+            # 更新配置
+            response = api_client.post("/api/v1/market/participants/config", json={
+                "symbol": symbol,
+                "target_price": 25.0,
+                "noise_trader_count": 8,
+                "order_interval": 0.5,
+            })
+            assert response.status_code == 200
+            data = response.json()["data"]["config"]
+            assert data["target_price"] == 25.0
+            assert data["noise_trader_count"] == 8
+            assert data["order_interval"] == 0.5
+
+        # 断开 WebSocket，等待行情源停止
+        for _ in range(100):
+            if symbol not in feed_handlers:
+                break
+            time.sleep(0.01)
+        assert symbol not in feed_handlers
+
+        # 重新连接 WebSocket，触发行情源重建
+        with api_client.websocket_connect("/ws/v1") as ws:
+            ws.send_json({"action": "subscribe", "channel": "market", "symbols": [symbol]})
+            for _ in range(50):
+                if symbol in feed_handlers:
+                    break
+                time.sleep(0.01)
+            assert symbol in feed_handlers
+
+            # 获取配置，应保留之前设置
+            response = api_client.get(f"/api/v1/market/participants/config?symbol={symbol}")
+            assert response.status_code == 200
+            data = response.json()["data"]["config"]
+            assert data["target_price"] == 25.0
+            assert data["noise_trader_count"] == 8
+            assert data["order_interval"] == 0.5

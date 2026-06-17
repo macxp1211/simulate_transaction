@@ -125,6 +125,9 @@ class MockLevel2Feed(Level2FeedHandler):
     def update_participant_config(self, config: dict):
         """动态更新参与者配置"""
         self.registry.update_config(config)
+        # 同步更新 feed 自身的订单生成间隔
+        if "order_interval" in config:
+            self.order_interval = config["order_interval"]
 
     def get_participant_config(self) -> dict:
         """获取当前参与者配置"""
@@ -154,15 +157,18 @@ class MockLevel2Feed(Level2FeedHandler):
             pass
 
     async def _generate_orders(self):
-        """由参与者生成模拟委托并推送到订单簿"""
+        """由参与者生成模拟委托并推送到订单簿
+
+        每次循环都从 registry 重新获取参与者列表，确保配置动态更新（包括
+        target_price、order_interval、参与者数量重建等）能够立即生效。
+        """
         # 先由做市商注入初始流动性
-        participants = self.registry.get_participants()
-        for p in participants:
+        for p in self.registry.get_participants():
             if hasattr(p, '_seeded'):
                 p._seeded = False
         # 让前几个 tick 快速初始化
         for _ in range(5):
-            for p in participants:
+            for p in self.registry.get_participants():
                 if not p.active:
                     continue
                 order = p.generate_order(None)
@@ -176,7 +182,8 @@ class MockLevel2Feed(Level2FeedHandler):
 
             snapshot = self._get_book_snapshot()
 
-            for p in participants:
+            # 每次循环重新获取参与者，以便 registry 重建或参数更新后生效
+            for p in self.registry.get_participants():
                 if not p.active:
                     continue
 

@@ -212,6 +212,7 @@ class TradeRecord:
     trigger_trade_id: Optional[str] = None  # 触发的逐笔成交ID
     fee: Decimal = Decimal("0")  # 该笔成交产生的手续费
     net_amount: Decimal = Decimal("0")  # 净额（买入为负，卖出为正）
+    counterparty_order_id: Optional[str] = None  # 对手方订单ID
 
     def to_dict(self) -> dict:
         return {
@@ -226,4 +227,5 @@ class TradeRecord:
             "trigger_trade_id": self.trigger_trade_id,
             "fee": str(self.fee),
             "net_amount": str(self.net_amount),
+            "counterparty_order_id": self.counterparty_order_id,
         }

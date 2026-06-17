@@ -457,74 +457,89 @@ class ParticipantRegistry:
         self._build_default_participants()
 
     def _build_default_participants(self):
-        """根据配置构建默认参与者"""
+        """根据配置构建默认参与者
+
+        重建时优先复用已有同 ID 参与者的非关键参数，避免用户每次更新配置后
+        其他策略参数被随机重置。
+        """
+        old = self._participants.copy()
         self._participants.clear()
         target = self._config.get("target_price", self.base_price)
+        base_interval = self._config.get("order_interval", 0.2)
+
+        def _get_old_attr(pid: str, attr: str, default):
+            p = old.get(pid)
+            return getattr(p, attr, default) if p else default
 
         # 做市商
         for i in range(self._config.get("market_maker_count", 2)):
+            pid = f"MM-{i+1}"
             p = MarketMaker(
-                participant_id=f"MM-{i+1}",
+                participant_id=pid,
                 symbol=self.symbol,
                 base_price=target,
                 target_price=float(target),
-                order_interval=self._config.get("order_interval", 0.2) * (0.8 + i * 0.2),
-                depth=random.randint(3, 6),
-                spread=0.01 + i * 0.01,
+                order_interval=base_interval * (0.8 + i * 0.2),
+                depth=_get_old_attr(pid, "depth", 5),
+                spread=_get_old_attr(pid, "spread", Decimal("0.02")),
             )
-            self._participants[p.participant_id] = p
+            self._participants[pid] = p
 
         # 趋势跟踪者
         for i in range(self._config.get("trend_follower_count", 1)):
+            pid = f"TF-{i+1}"
             p = TrendFollower(
-                participant_id=f"TF-{i+1}",
+                participant_id=pid,
                 symbol=self.symbol,
                 base_price=target,
                 target_price=float(target),
-                order_interval=self._config.get("order_interval", 0.2) * (1.5 + i * 0.5),
-                window_size=random.randint(5, 15),
-                momentum_threshold=random.uniform(0.01, 0.03),
+                order_interval=base_interval * (1.5 + i * 0.5),
+                window_size=_get_old_attr(pid, "window_size", 10),
+                momentum_threshold=_get_old_attr(pid, "momentum_threshold", Decimal("0.02")),
             )
-            self._participants[p.participant_id] = p
+            self._participants[pid] = p
 
         # 均值回归者
         for i in range(self._config.get("mean_reversion_count", 1)):
+            pid = f"MR-{i+1}"
             p = MeanReversionTrader(
-                participant_id=f"MR-{i+1}",
+                participant_id=pid,
                 symbol=self.symbol,
                 base_price=target,
                 target_price=float(target),
-                order_interval=self._config.get("order_interval", 0.2) * (1.2 + i * 0.3),
-                ma_window=random.randint(15, 30),
-                deviation_threshold=random.uniform(0.02, 0.05),
+                order_interval=base_interval * (1.2 + i * 0.3),
+                ma_window=_get_old_attr(pid, "ma_window", 20),
+                deviation_threshold=_get_old_attr(pid, "deviation_threshold", Decimal("0.03")),
             )
-            self._participants[p.participant_id] = p
+            self._participants[pid] = p
 
         # 噪声交易者
         for i in range(self._config.get("noise_trader_count", 3)):
+            pid = f"NT-{i+1}"
             p = NoiseTrader(
-                participant_id=f"NT-{i+1}",
+                participant_id=pid,
                 symbol=self.symbol,
                 base_price=target,
                 target_price=float(target),
-                order_interval=self._config.get("order_interval", 0.2) * random.uniform(0.5, 1.5),
-                irrational_prob=random.uniform(0.03, 0.08),
-                cancel_prob=random.uniform(0.10, 0.20),
+                order_interval=base_interval * (0.8 + i * 0.2),
+                irrational_prob=_get_old_attr(pid, "irrational_prob", 0.05),
+                cancel_prob=_get_old_attr(pid, "cancel_prob", 0.15),
             )
-            self._participants[p.participant_id] = p
+            self._participants[pid] = p
 
         # 激进交易者
         for i in range(self._config.get("aggressive_trader_count", 1)):
+            pid = f"AT-{i+1}"
             p = AggressiveTrader(
-                participant_id=f"AT-{i+1}",
+                participant_id=pid,
                 symbol=self.symbol,
                 base_price=target,
                 target_price=float(target),
-                order_interval=self._config.get("order_interval", 0.2) * random.uniform(2.0, 4.0),
-                burst_prob=random.uniform(0.10, 0.20),
-                min_depth=random.randint(1000, 3000),
+                order_interval=base_interval * (2.0 + i * 0.5),
+                burst_prob=_get_old_attr(pid, "burst_prob", 0.15),
+                min_depth=_get_old_attr(pid, "min_depth", 2000),
             )
-            self._participants[p.participant_id] = p
+            self._participants[pid] = p
 
     def update_config(self, config: Dict):
         """更新配置并重建参与者"""
