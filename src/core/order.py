@@ -152,6 +152,47 @@ class Order:
             self.queue_info.current_queue_position = new_position
             self.queue_info.current_queue_length = new_length
     
+    @classmethod
+    def from_dict(cls, data: dict) -> "Order":
+        """从字典恢复订单"""
+        side = Side(data.get("side", "buy").lower())
+        order_type = OrderType(data.get("order_type", "limit").lower())
+        price = Decimal(str(data.get("price", "0")))
+        quantity = int(data.get("quantity", 0))
+        order = cls(
+            symbol=data.get("symbol", ""),
+            side=side,
+            price=price,
+            quantity=quantity,
+            order_type=order_type,
+            order_id=data.get("order_id"),
+            filled_qty=int(data.get("filled_qty", 0)),
+            cancelled_qty=int(data.get("cancelled_qty", 0)),
+            status=OrderStatus(data.get("status", "pending").lower()),
+            reject_reason=data.get("reject_reason"),
+            is_mock=bool(data.get("is_mock", False)),
+            participant_id=data.get("participant_id"),
+            source=data.get("source", "internal"),
+        )
+        # 恢复时间戳
+        if data.get("create_time"):
+            order.create_time = datetime.fromisoformat(data["create_time"])
+        if data.get("update_time"):
+            order.update_time = datetime.fromisoformat(data["update_time"])
+        # 恢复队列信息
+        qi = data.get("queue_info")
+        if qi:
+            order.queue_info = QueueInfo(
+                queue_length_at_enter=qi.get("queue_length_at_enter", 0),
+                queue_position_at_enter=qi.get("queue_position_at_enter", 0),
+                current_queue_length=qi.get("current_queue_length", 0),
+                current_queue_position=qi.get("current_queue_position", 0),
+                enter_queue_time=datetime.fromisoformat(qi["enter_queue_time"]) if qi.get("enter_queue_time") else None,
+                leave_queue_time=datetime.fromisoformat(qi["leave_queue_time"]) if qi.get("leave_queue_time") else None,
+            )
+        # 恢复冻结信息（数据库未持久化 frozen_total/frozen_position_qty，可在恢复后由调用方补充）
+        return order
+
     def to_dict(self) -> dict:
         """转换为字典"""
         result = {

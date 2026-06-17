@@ -196,6 +196,35 @@ class PersistenceManager:
             rows = cursor.fetchall()
             return [dict(r) for r in rows]
 
+    def get_active_orders(self, symbol: Optional[str] = None, limit: int = 10000) -> List[dict]:
+        """查询需要恢复的活跃订单（active/queued/partial）"""
+        with sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            query = """
+                SELECT * FROM orders
+                WHERE status IN ('active', 'queued', 'partial')
+            """
+            params = []
+            if symbol:
+                query += " AND symbol = ?"
+                params.append(symbol)
+            query += " ORDER BY create_time ASC LIMIT ?"
+            params.append(limit)
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    def get_distinct_active_symbols(self) -> List[str]:
+        """获取存在活跃订单的标列表"""
+        with sqlite3.connect(self._db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT symbol FROM orders
+                WHERE status IN ('active', 'queued', 'partial')
+            """)
+            return [row[0] for row in cursor.fetchall()]
+
     # ─────────── 成交记录持久化 ───────────
 
     def save_trade(self, trade_dict: dict):
@@ -267,6 +296,19 @@ class PersistenceManager:
             query += " ORDER BY trade_time DESC LIMIT ?"
             params.append(limit)
             cursor.execute(query, params)
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    def get_recent_trades(self, limit: int = 500) -> List[dict]:
+        """获取最近成交记录（按时间正序）"""
+        with sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM trades
+                ORDER BY trade_time ASC
+                LIMIT ?
+            """, (limit,))
             rows = cursor.fetchall()
             return [dict(r) for r in rows]
 
@@ -347,6 +389,21 @@ class PersistenceManager:
                 account_dict.get("trade_count", 0),
             ))
             conn.commit()
+
+    def get_latest_settlement(self, symbol: Optional[str] = None) -> Optional[dict]:
+        """获取最新结算记录，用于启动恢复"""
+        with sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            query = "SELECT * FROM settlements WHERE 1=1"
+            params = []
+            if symbol:
+                query += " AND symbol = ?"
+                params.append(symbol)
+            query += " ORDER BY settle_date DESC, id DESC LIMIT 1"
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            return dict(row) if row else None
 
     # ─────────── 排行榜持久化 ───────────
 

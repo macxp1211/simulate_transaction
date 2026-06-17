@@ -153,6 +153,26 @@ class Account:
 
     # ─────────── 序列化 ───────────
 
+    def restore_from_dict(self, data: dict):
+        """从持久化字典恢复账户状态（不重置 initial_cash/initial_position）"""
+        self.cash = Decimal(str(data.get("cash", self.initial_cash))).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        self.frozen_cash = Decimal(str(data.get("frozen_cash", "0"))).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        self.available_position = int(data.get("available_position", self.initial_position))
+        self.frozen_position = int(data.get("frozen_position", 0))
+        self.today_bought_position = int(data.get("today_bought_position", 0))
+        self.total_fees = Decimal(str(data.get("total_fees", "0"))).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        self.trade_count = int(data.get("trade_count", 0))
+        if data.get("updated_at"):
+            self.updated_at = datetime.fromisoformat(data["updated_at"])
+        else:
+            self.updated_at = datetime.now()
+
     def to_dict(self) -> dict:
         return {
             "account_id": self.account_id,

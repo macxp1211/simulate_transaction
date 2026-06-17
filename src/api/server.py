@@ -144,10 +144,82 @@ async def root():
     return RedirectResponse(url="/static/index.html")
 
 
+async def _restore_state():
+    """启动时从 SQLite 恢复账户状态和活跃订单"""
+    print("[Restore] 开始从持久化恢复状态...")
+
+    # 1. 恢复账户：优先使用最新日终结算记录
+    try:
+        settlement = await _run_persistence(persistence.get_latest_settlement)
+        if settlement:
+            account.restore_from_dict(settlement)
+            print(
+                f"[Restore] 账户已恢复: cash={account.cash}, "
+                f"available={account.available_position}, "
+                f"frozen={account.frozen_position}, "
+                f"today_bought={account.today_bought_position}"
+            )
+        else:
+            print("[Restore] 未找到结算记录，使用默认账户状态")
+    except Exception as e:
+        print(f"[Restore] 账户恢复失败: {e}")
+
+    # 2. 恢复活跃订单到对应引擎订单簿
+    try:
+        active_order_dicts = await _run_persistence(persistence.get_active_orders)
+        if not active_order_dicts:
+            print("[Restore] 没有活跃订单需要恢复")
+        else:
+            # 按 symbol 分组并按创建时间排序，保持原始 FIFO 顺序
+            orders_by_symbol: Dict[str, List[Order]] = {}
+            for od in active_order_dicts:
+                try:
+                    order = Order.from_dict(od)
+                    orders_by_symbol.setdefault(order.symbol, []).append(order)
+                except Exception as e:
+                    print(f"[Restore] 跳过无效订单 {od.get('order_id')}: {e}")
+
+            for symbol, orders in orders_by_symbol.items():
+                orders.sort(key=lambda o: o.create_time)
+                engine = await engine_manager.get_or_create_engine(symbol)
+                for order in orders:
+                    engine.order_book.restore_order(order)
+                print(f"[Restore] {symbol} 已恢复 {len(orders)} 个活跃订单")
+    except Exception as e:
+        print(f"[Restore] 订单恢复失败: {e}")
+
+    # 3. 恢复前端缓存（成交历史、价格历史）
+    try:
+        recent_trades = await _run_persistence(persistence.get_recent_trades, max_trade_history)
+        # 清空旧缓存并按时间正序填充
+        trade_history_cache.clear()
+        trade_history_cache.extend(recent_trades)
+
+        price_history_cache.clear()
+        for t in recent_trades:
+            symbol = t.get("symbol")
+            if not symbol:
+                continue
+            if symbol not in price_history_cache:
+                price_history_cache[symbol] = []
+            price_history_cache[symbol].append({
+                "time": t.get("trade_time"),
+                "price": float(t.get("price", 0)),
+                "quantity": t.get("quantity", 0),
+                "side": t.get("side"),
+            })
+        print(f"[Restore] 已恢复 {len(recent_trades)} 条成交记录到前端缓存")
+    except Exception as e:
+        print(f"[Restore] 缓存恢复失败: {e}")
+
+
 @app.on_event("startup")
 async def startup_event():
     """启动事件"""
     print("撮合系统启动中...")
+
+    # 优先从持久化恢复状态（账户、活跃订单、缓存）
+    await _restore_state()
 
     # 注册全局成交回调：撮合引擎产生成交后广播给对应标的的订阅者
     async def on_trade_generated(trade):

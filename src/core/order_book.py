@@ -11,7 +11,7 @@ try:
 except ImportError:
     HAS_SORTEDCONTAINERS = False
 
-from .order import Order, Side, OrderStatus, TradeRecord, OrderType
+from .order import Order, Side, OrderStatus, TradeRecord, OrderType, QueueInfo
 
 
 class SimpleSortedDict:
@@ -404,7 +404,47 @@ class OrderBook:
         
         order.cancel()
         return order
-    
+
+    def restore_order(self, order: Order):
+        """启动恢复：直接将订单放入队列，不触发撮合和回调
+
+        要求订单状态为 active/queued/partial，且剩余数量 > 0。
+        恢复时按传入顺序追加到对应价格层级的队尾，保持原始 FIFO 顺序。
+        """
+        if order.symbol != self.symbol:
+            raise ValueError(f"Symbol mismatch: {order.symbol} != {self.symbol}")
+        if not order.is_active or order.remaining_qty <= 0:
+            return
+
+        self._all_orders[order.order_id] = order
+
+        book = self.bids if order.side == Side.BUY else self.asks
+        price = order.price
+        if price not in book:
+            book[price] = PriceLevel(price)
+        level = book[price]
+        level.add(order)
+
+        # 如果原队列信息不存在，按当前层级长度补一个
+        if order.queue_info is None:
+            queue_length = len(level)
+            order.queue_info = QueueInfo(
+                queue_length_at_enter=queue_length,
+                queue_position_at_enter=queue_length,
+                current_queue_length=queue_length,
+                current_queue_position=queue_length,
+                enter_queue_time=datetime.now(),
+            )
+        else:
+            order.queue_info.current_queue_length = len(level)
+            order.queue_info.current_queue_position = len(level)
+
+        # 确保状态为 queued（部分成交的订单在队列中仍视为 partial）
+        if order.status == OrderStatus.ACTIVE:
+            order.status = OrderStatus.QUEUED
+
+        self._order_index[order.order_id] = (order.side, price, order)
+
     # ─────────── 逐笔成交驱动的队列消耗 ───────────
     
     def consume_queue_on_trade(self, trade_price: Decimal, trade_qty: int, 
