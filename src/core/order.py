@@ -66,6 +66,9 @@ class Order:
     # 模拟行情订单标记：不参与真实账户冻结/解冻
     is_mock: bool = False
 
+    # 行情参与者标识（仅 mock 订单填写，如 MM-1 / NT-2）
+    participant_id: Optional[str] = None
+
     # 时间戳
     create_time: datetime = field(default_factory=datetime.now)
     update_time: datetime = field(default_factory=datetime.now)
@@ -165,6 +168,9 @@ class Order:
 
         if self.reject_reason:
             result["reject_reason"] = self.reject_reason
+
+        if self.participant_id:
+            result["participant_id"] = self.participant_id
         
         if self.queue_info:
             result["queue_info"] = {

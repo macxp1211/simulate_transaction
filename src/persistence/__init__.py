@@ -34,6 +34,7 @@ class PersistenceManager:
                     status TEXT,
                     order_type TEXT,
                     is_mock INTEGER,
+                    participant_id TEXT,
                     create_time TEXT,
                     update_time TEXT,
                     queue_length_at_enter INTEGER,
@@ -42,6 +43,11 @@ class PersistenceManager:
                     reject_reason TEXT
                 )
             """)
+            # 兼容旧表：添加 participant_id 列
+            try:
+                cursor.execute("ALTER TABLE orders ADD COLUMN participant_id TEXT")
+            except sqlite3.OperationalError:
+                pass
             # 成交记录表
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS trades (
@@ -99,9 +105,9 @@ class PersistenceManager:
             cursor.execute("""
                 INSERT OR REPLACE INTO orders (
                     order_id, symbol, side, price, quantity, filled_qty, cancelled_qty,
-                    status, order_type, is_mock, create_time, update_time,
+                    status, order_type, is_mock, participant_id, create_time, update_time,
                     queue_length_at_enter, queue_position_at_enter, leave_queue_time, reject_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 order_dict.get("order_id"),
                 order_dict.get("symbol"),
@@ -113,6 +119,7 @@ class PersistenceManager:
                 order_dict.get("status"),
                 order_dict.get("order_type"),
                 1 if order_dict.get("is_mock") else 0,
+                order_dict.get("participant_id"),
                 order_dict.get("create_time"),
                 order_dict.get("update_time"),
                 qi.get("queue_length_at_enter") if qi else None,
@@ -131,9 +138,9 @@ class PersistenceManager:
                 cursor.execute("""
                     INSERT OR REPLACE INTO orders (
                         order_id, symbol, side, price, quantity, filled_qty, cancelled_qty,
-                        status, order_type, is_mock, create_time, update_time,
+                        status, order_type, is_mock, participant_id, create_time, update_time,
                         queue_length_at_enter, queue_position_at_enter, leave_queue_time, reject_reason
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     order_dict.get("order_id"),
                     order_dict.get("symbol"),
@@ -145,6 +152,7 @@ class PersistenceManager:
                     order_dict.get("status"),
                     order_dict.get("order_type"),
                     1 if order_dict.get("is_mock") else 0,
+                    order_dict.get("participant_id"),
                     order_dict.get("create_time"),
                     order_dict.get("update_time"),
                     qi.get("queue_length_at_enter") if qi else None,

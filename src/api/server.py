@@ -141,6 +141,14 @@ async def startup_event():
                 _notify_participant_filled(trade.order_id, trade.to_dict())
         except Exception as e:
             print(f"[Persistence] save trade/order error: {e}")
+
+        # 在日志中记录成交来源（用户订单或 mock 参与者）
+        participant_id = order.participant_id if order else None
+        source = participant_id or "USER"
+        print(
+            f"[Trade] {source} {trade.side} {trade.symbol} @ {trade.price} x {trade.quantity} "
+            f"(order={trade.order_id}, source={trade.match_source})"
+        )
         # 缓存到成交历史
         trade_dict = trade.to_dict()
         trade_history_cache.append(trade_dict)
@@ -796,6 +804,7 @@ async def _start_market_feed(symbol: str):
     # 注册模拟委托回调：将 mock 委托放入撮合引擎订单簿
     # mock 订单仅用于构造盘口/队列，不参与真实账户冻结
     async def on_order(order_data: dict):
+        participant_id = order_data.get("participant_id")
         order = Order(
             symbol=order_data["symbol"],
             side=Side(order_data["side"]),
@@ -804,6 +813,12 @@ async def _start_market_feed(symbol: str):
             order_type=OrderType.LIMIT,
             order_id=order_data["order_id"],
             is_mock=True,
+            participant_id=participant_id,
+        )
+        # 日志记录参与者下单
+        print(
+            f"[Feed] {participant_id or 'unknown'} placed {order.side.value} "
+            f"order {order.order_id} @ {order.price} x {order.quantity}"
         )
         await engine_manager.place_order(order)
 
