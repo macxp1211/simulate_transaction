@@ -36,6 +36,7 @@ class SymbolMatchingEngine:
         config: Optional[MatchingConfig] = None,
         account: Optional[Account] = None,
         fee_calculator: Optional[FeeCalculator] = None,
+        latency_injector=None,
     ):
         self.symbol = symbol
         self.config = config or MatchingConfig()
@@ -51,10 +52,14 @@ class SymbolMatchingEngine:
         self.account = account
         self.fee_calculator = fee_calculator or AShareFeeCalculator()
 
+        # 延迟注入器（可选）
+        self._latency_injector = latency_injector
+
         # 事件队列（串行处理保证顺序）
         self._event_queue: asyncio.Queue = asyncio.Queue()
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        self._latency_task: Optional[asyncio.Task] = None
 
         # 成交回调
         self._trade_callbacks: List[Callable] = []
@@ -84,17 +89,24 @@ class SymbolMatchingEngine:
         self._running = True
         self._event_queue = asyncio.Queue()
         self._task = asyncio.create_task(self._run_loop())
-    
+
+        # 启动延迟注入器调度循环
+        if self._latency_injector is not None:
+            self._latency_injector.set_output_callback(self._event_queue.put)
+            await self._latency_injector.start()
+
     async def stop(self):
         """停止撮合循环"""
         self._running = False
+        if self._latency_injector is not None:
+            await self._latency_injector.stop()
         if self._task:
             self._task.cancel()
             try:
                 await self._task
             except asyncio.CancelledError:
                 pass
-    
+
     async def _run_loop(self):
         """主事件循环"""
         while self._running:
@@ -108,7 +120,7 @@ class SymbolMatchingEngine:
             except Exception as e:
                 # 日志记录错误
                 print(f"[{self.symbol}] Error processing event: {e}")
-    
+
     async def _process_event(self, event: dict):
         """处理事件"""
         event_type = event.get("type")
@@ -463,7 +475,11 @@ class SymbolMatchingEngine:
         if not self._running or (self._task and self._task.done()):
             await self.start()
         done = asyncio.Event()
-        await self._event_queue.put({"type": "order", "order": order, "_done": done})
+        event = {"type": "order", "order": order, "_done": done}
+        if self._latency_injector is not None and self._latency_injector.get_latency(order.source) > 0:
+            await self._latency_injector.inject(event, source=order.source)
+        else:
+            await self._event_queue.put(event)
         await done.wait()
         return order
 
@@ -472,7 +488,15 @@ class SymbolMatchingEngine:
         if not self._running or (self._task and self._task.done()):
             await self.start()
         done = asyncio.Event()
-        await self._event_queue.put({"type": "cancel", "order_id": order_id, "_done": done})
+        # 撤单延迟使用内部账户默认延迟
+        source = "internal"
+        if self._latency_injector is not None and self._latency_injector.get_latency(source) > 0:
+            await self._latency_injector.inject(
+                {"type": "cancel", "order_id": order_id, "_done": done},
+                source=source,
+            )
+        else:
+            await self._event_queue.put({"type": "cancel", "order_id": order_id, "_done": done})
         await done.wait()
         return self.order_book.get_order(order_id)
     
@@ -516,12 +540,14 @@ class MatchingEngineManager:
         self,
         account: Optional[Account] = None,
         fee_calculator: Optional[FeeCalculator] = None,
+        latency_injector=None,
     ):
         self._engines: Dict[str, SymbolMatchingEngine] = {}
         self._lock = asyncio.Lock()
         self._trade_callbacks: List[Callable] = []
         self._account = account or Account()
         self._fee_calculator = fee_calculator or AShareFeeCalculator()
+        self._latency_injector = latency_injector
 
     def on_trade_generated(self, callback: Callable):
         """注册全局成交生成回调"""
@@ -538,6 +564,7 @@ class MatchingEngineManager:
                     symbol,
                     account=self._account,
                     fee_calculator=self._fee_calculator,
+                    latency_injector=self._latency_injector,
                 )
                 # 注册全局成交回调
                 for cb in self._trade_callbacks:

@@ -69,6 +69,9 @@ class Order:
     # 行情参与者标识（仅 mock 订单填写，如 MM-1 / NT-2）
     participant_id: Optional[str] = None
 
+    # 订单来源：external 表示外部匿名行情订单；internal 表示内部真实账户/RL 订单
+    source: str = "internal"
+
     # 时间戳
     create_time: datetime = field(default_factory=datetime.now)
     update_time: datetime = field(default_factory=datetime.now)

@@ -11,6 +11,7 @@ import os
 
 from ..core.order import Order, Side, OrderType, OrderStatus
 from ..core.matching_engine import MatchingEngineManager
+from ..core.latency_injector import LatencyInjector
 from ..core.account import Account
 from ..core.fee import AShareFeeCalculator
 from ..data.level2_feed import MockLevel2Feed
@@ -38,7 +39,12 @@ else:
 # 全局账户、费用模型、引擎管理器与持久化
 account = Account(initial_position=100000)
 fee_calculator = AShareFeeCalculator()
-engine_manager = MatchingEngineManager(account=account, fee_calculator=fee_calculator)
+# 延迟注入器：模拟不同来源的网络/撮合延迟（毫秒）
+# 默认无延迟，可通过 API 动态开启以进行策略压力测试
+latency_injector = LatencyInjector(default_latency_ms=0.0)
+engine_manager = MatchingEngineManager(
+    account=account, fee_calculator=fee_calculator, latency_injector=latency_injector
+)
 persistence = PersistenceManager(data_dir="data")
 
 # 用于执行同步持久化 IO 的线程池，避免阻塞 asyncio 事件循环
@@ -301,6 +307,7 @@ async def create_order(req: OrderRequest):
             price=price,
             quantity=req.quantity,
             order_type=order_type,
+            source="internal",
         )
         
         result = await engine_manager.place_order(order)
@@ -325,6 +332,8 @@ async def create_order(req: OrderRequest):
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -944,6 +953,45 @@ async def get_depth_chart_data(symbol: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class LatencyConfigRequest(BaseModel):
+    source: str = Field(..., description="来源：external 或 internal")
+    latency_ms: float = Field(..., ge=0, description="延迟毫秒数")
+
+
+@app.get("/api/v1/latency", response_model=OrderResponse)
+async def get_latency_config():
+    """获取当前延迟注入配置"""
+    try:
+        return OrderResponse(
+            code=0,
+            message="success",
+            data={
+                "default_ms": latency_injector.get_latency("__default__"),
+                "external_ms": latency_injector.get_latency("external"),
+                "internal_ms": latency_injector.get_latency("internal"),
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/latency", response_model=OrderResponse)
+async def set_latency_config(req: LatencyConfigRequest):
+    """设置某类来源的延迟（毫秒）"""
+    try:
+        latency_injector.set_latency(req.source, req.latency_ms)
+        return OrderResponse(
+            code=0,
+            message="success",
+            data={
+                "source": req.source,
+                "latency_ms": latency_injector.get_latency(req.source),
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ─────────── WebSocket ───────────
 
 class ConnectionManager:
@@ -1061,6 +1109,7 @@ async def _start_market_feed(symbol: str):
             order_id=order_data["order_id"],
             is_mock=True,
             participant_id=participant_id,
+            source="external",
         )
         # 日志记录参与者下单
         print(

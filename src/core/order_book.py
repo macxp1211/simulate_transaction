@@ -451,9 +451,12 @@ class OrderBook:
         remaining = cancel_qty
         orders_to_remove = []
 
+        # 仅消耗外部匿名订单；内部真实账户/RL 订单通过 explicit cancel_order 撤销
         for order in level.orders:
             if remaining <= 0:
                 break
+            if order.source != "external":
+                continue
             if not order.is_active:
                 orders_to_remove.append(order)
                 continue

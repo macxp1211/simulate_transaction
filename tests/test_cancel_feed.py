@@ -23,8 +23,8 @@ class TestOrderBookConsumeQueueOnCancel:
         book = OrderBook("000001.SZ")
         price = Decimal("10.00")
 
-        o1 = Order(symbol="000001.SZ", side=Side.BUY, price=price, quantity=500)
-        o2 = Order(symbol="000001.SZ", side=Side.BUY, price=price, quantity=500)
+        o1 = Order(symbol="000001.SZ", side=Side.BUY, price=price, quantity=500, source="external")
+        o2 = Order(symbol="000001.SZ", side=Side.BUY, price=price, quantity=500, source="external")
         book.add_order(o1)
         book.add_order(o2)
 
@@ -46,9 +46,9 @@ class TestOrderBookConsumeQueueOnCancel:
         book = OrderBook("000001.SZ")
         price = Decimal("10.00")
 
-        o1 = Order(symbol="000001.SZ", side=Side.SELL, price=price, quantity=100)
-        o2 = Order(symbol="000001.SZ", side=Side.SELL, price=price, quantity=100)
-        o3 = Order(symbol="000001.SZ", side=Side.SELL, price=price, quantity=100)
+        o1 = Order(symbol="000001.SZ", side=Side.SELL, price=price, quantity=100, source="external")
+        o2 = Order(symbol="000001.SZ", side=Side.SELL, price=price, quantity=100, source="external")
+        o3 = Order(symbol="000001.SZ", side=Side.SELL, price=price, quantity=100, source="external")
         for o in (o1, o2, o3):
             book.add_order(o)
 
@@ -68,7 +68,7 @@ class TestOrderBookConsumeQueueOnCancel:
     def test_cancel_more_than_level_quantity(self):
         book = OrderBook("000001.SZ")
         price = Decimal("10.00")
-        o1 = Order(symbol="000001.SZ", side=Side.BUY, price=price, quantity=200)
+        o1 = Order(symbol="000001.SZ", side=Side.BUY, price=price, quantity=200, source="external")
         book.add_order(o1)
 
         consumed = book.consume_queue_on_cancel(price, 9999, "buy")
@@ -97,6 +97,7 @@ class TestMatchingEngineCancelFeed:
             await manager.place_order(Order(
                 symbol="000001.SZ", side=Side.SELL, price=Decimal("10.02"),
                 quantity=100, order_type=OrderType.LIMIT,
+                source="external",
             ))
 
         # Seed 3 passive buys ahead of the user at 10.00
@@ -104,6 +105,7 @@ class TestMatchingEngineCancelFeed:
             await manager.place_order(Order(
                 symbol="000001.SZ", side=Side.BUY, price=Decimal("10.00"),
                 quantity=100, order_type=OrderType.LIMIT,
+                source="external",
             ))
 
         # User passive buy at 10.00, should be 4th in queue
@@ -141,6 +143,7 @@ class TestMatchingEngineCancelFeed:
         await manager.place_order(Order(
             symbol="000001.SZ", side=Side.BUY, price=Decimal("10.00"),
             quantity=100, order_type=OrderType.LIMIT,
+            source="external",
         ))
 
         trades_before = len(manager.get_all_engines()["000001.SZ"].order_book.get_trades())
