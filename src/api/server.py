@@ -14,6 +14,7 @@ from ..core.account import Account
 from ..core.fee import AShareFeeCalculator
 from ..data.level2_feed import MockLevel2Feed
 from ..data.market_data import TradeEvent, QuoteEvent
+from ..persistence import PersistenceManager
 
 
 # ─────────── FastAPI App ───────────
@@ -21,7 +22,7 @@ from ..data.market_data import TradeEvent, QuoteEvent
 app = FastAPI(
     title="高精度队列模拟撮合系统",
     description="基于 Level-2 逐笔成交和盘口行情的队列模拟撮合系统",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 # 挂载静态文件服务（前端页面）
@@ -33,17 +34,25 @@ else:
     os.makedirs(frontend_dir, exist_ok=True)
     app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
 
-# 全局账户、费用模型与引擎管理器
-# 默认账户附带一定底仓，便于模拟卖出场景；今日买入仍需 settle 后变为可用
+# 全局账户、费用模型、引擎管理器与持久化
 account = Account(initial_position=100000)
 fee_calculator = AShareFeeCalculator()
 engine_manager = MatchingEngineManager(account=account, fee_calculator=fee_calculator)
+persistence = PersistenceManager(data_dir="data")
 
 # 行情源（模拟）
 feed_handlers: Dict[str, MockLevel2Feed] = {}
 
 # 行情订阅者：symbol -> set(client_id)
 market_subscribers: Dict[str, set] = {}
+
+# 成交历史缓存（用于前端行情展示）
+trade_history_cache: List[dict] = []
+max_trade_history = 500
+
+# 价格历史缓存（用于前端走势图）
+price_history_cache: Dict[str, List[dict]] = {}
+max_price_history = 300
 
 class OrderRequest(BaseModel):
     symbol: str = Field(..., description="标的代码，如 000001.SZ")
@@ -74,6 +83,23 @@ class TradeQuery(BaseModel):
     page_size: int = 20
 
 
+class ParticipantConfigRequest(BaseModel):
+    symbol: Optional[str] = "000001.SZ"
+    target_price: Optional[float] = None
+    market_maker_count: Optional[int] = None
+    trend_follower_count: Optional[int] = None
+    mean_reversion_count: Optional[int] = None
+    noise_trader_count: Optional[int] = None
+    aggressive_trader_count: Optional[int] = None
+    order_interval: Optional[float] = None
+
+class ParticipantConfigResponse(BaseModel):
+    code: int = 0
+    message: str = "success"
+    data: Optional[dict] = None
+
+
+
 # ─────────── FastAPI App ───────────
 
 
@@ -90,15 +116,43 @@ async def startup_event():
 
     # 注册全局成交回调：撮合引擎产生成交后广播给对应标的的订阅者
     async def on_trade_generated(trade):
+        # 广播给 WebSocket 订阅者
         await _broadcast_trade(trade)
+        # 保存到持久化
+        try:
+            persistence.save_trade(trade.to_dict())
+        except Exception as e:
+            print(f"[Persistence] save trade error: {e}")
+        # 缓存到成交历史
+        trade_dict = trade.to_dict()
+        trade_history_cache.append(trade_dict)
+        if len(trade_history_cache) > max_trade_history:
+            trade_history_cache.pop(0)
+        # 更新价格历史
+        symbol = trade.symbol
+        if symbol not in price_history_cache:
+            price_history_cache[symbol] = []
+        ph = price_history_cache[symbol]
+        ph.append({
+            "time": trade.trade_time.isoformat(),
+            "price": float(trade.price),
+            "quantity": trade.quantity,
+            "side": trade.side,
+        })
+        if len(ph) > max_price_history:
+            ph.pop(0)
 
     engine_manager.on_trade_generated(on_trade_generated)
 
-    # 启动默认标的的模拟行情源，使系统即使没有 WebSocket 订阅也具备流动性
+    # 启动默认标的的模拟行情源
     await _start_market_feed("000001.SZ")
-    # 启动盘口快照广播任务（无订阅者时会自动退出）
+    # 启动盘口快照广播任务
     if "000001.SZ" not in quote_broadcast_tasks or quote_broadcast_tasks["000001.SZ"].done():
         quote_broadcast_tasks["000001.SZ"] = asyncio.create_task(_quote_broadcast_loop("000001.SZ"))
+    # 启动持久化快照任务
+    asyncio.create_task(_persistence_snapshot_loop())
+    # 启动价格历史广播任务
+    asyncio.create_task(_price_history_broadcast_loop())
 
 
 async def _broadcast_trade(trade):
@@ -119,6 +173,44 @@ async def shutdown_event():
     for feed in feed_handlers.values():
         await feed.stop()
     await engine_manager.shutdown_all()
+
+
+async def _persistence_snapshot_loop():
+    """定期保存订单簿快照到持久化"""
+    while True:
+        try:
+            await asyncio.sleep(5.0)
+            for symbol, engine in engine_manager.get_all_engines().items():
+                try:
+                    snapshot = engine.get_orderbook_snapshot(depth=10)
+                    persistence.save_snapshot(snapshot)
+                except Exception as e:
+                    print(f"[Persistence] snapshot error {symbol}: {e}")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"[Persistence] loop error: {e}")
+
+
+async def _price_history_broadcast_loop():
+    """定期广播价格历史给所有 WebSocket 客户端"""
+    while True:
+        try:
+            await asyncio.sleep(2.0)
+            for symbol, history in price_history_cache.items():
+                if not history:
+                    continue
+                message = {
+                    "type": "price_history",
+                    "symbol": symbol,
+                    "data": history,
+                }
+                for cid in list(market_subscribers.get(symbol, set())):
+                    await ws_manager.send_to(cid, message)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"[PriceHistory] broadcast error: {e}")
 
 
 # ─────────── REST API ───────────
@@ -408,6 +500,12 @@ async def settle_account():
             raise HTTPException(status_code=404, detail="Account not found")
 
         acc.settle()
+        # 保存结算记录到持久化
+        try:
+            for symbol in engine_manager.get_all_engines().keys():
+                persistence.save_settlement(symbol, acc.to_dict())
+        except Exception as e:
+            print(f"[Persistence] settle save error: {e}")
         return OrderResponse(
             code=0,
             message="success",
@@ -415,6 +513,149 @@ async def settle_account():
         )
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─────────── 行情与参与者配置 API ───────────
+
+@app.get("/api/v1/market/trade_history", response_model=OrderResponse)
+async def get_trade_history(symbol: Optional[str] = None, limit: int = 100):
+    """获取实时成交历史（内存缓存）"""
+    try:
+        trades = trade_history_cache
+        if symbol:
+            trades = [t for t in trades if t.get("symbol") == symbol]
+        trades = trades[-limit:]
+        return OrderResponse(
+            code=0,
+            message="success",
+            data={"trades": trades, "total": len(trades)},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/market/price_history", response_model=OrderResponse)
+async def get_price_history(symbol: str = "000001.SZ", limit: int = 200):
+    """获取价格历史（用于走势图）"""
+    try:
+        history = price_history_cache.get(symbol, [])
+        history = history[-limit:]
+        return OrderResponse(
+            code=0,
+            message="success",
+            data={"symbol": symbol, "history": history},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/market/participants", response_model=OrderResponse)
+async def get_participants(symbol: Optional[str] = None):
+    """获取行情参与者状态和统计"""
+    try:
+        all_stats = []
+        for sym, feed in feed_handlers.items():
+            if symbol and sym != symbol:
+                continue
+            all_stats.extend(feed.participant_stats)
+        return OrderResponse(
+            code=0,
+            message="success",
+            data={"participants": all_stats},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/market/participants/config", response_model=OrderResponse)
+async def update_participant_config(req: ParticipantConfigRequest):
+    """更新行情参与者配置（目标价格、数量、频率等）"""
+    try:
+        symbol = req.symbol or "000001.SZ"
+        config = {}
+        if req.target_price is not None:
+            config["target_price"] = req.target_price
+        if req.market_maker_count is not None:
+            config["market_maker_count"] = req.market_maker_count
+        if req.trend_follower_count is not None:
+            config["trend_follower_count"] = req.trend_follower_count
+        if req.mean_reversion_count is not None:
+            config["mean_reversion_count"] = req.mean_reversion_count
+        if req.noise_trader_count is not None:
+            config["noise_trader_count"] = req.noise_trader_count
+        if req.aggressive_trader_count is not None:
+            config["aggressive_trader_count"] = req.aggressive_trader_count
+        if req.order_interval is not None:
+            config["order_interval"] = req.order_interval
+
+        feed = feed_handlers.get(symbol)
+        if feed is not None:
+            feed.update_participant_config(config)
+            current = feed.get_participant_config()
+        else:
+            # 如果行情源未启动，直接更新注册表配置
+            from ..data.participants import ParticipantRegistry
+            registry = ParticipantRegistry(symbol=symbol, base_price=config.get("target_price", 10.50))
+            registry.update_config(config)
+            current = registry.get_config()
+
+        return OrderResponse(
+            code=0,
+            message="success",
+            data={"config": current, "symbol": symbol},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/market/participants/config", response_model=OrderResponse)
+async def get_participant_config(symbol: str = "000001.SZ"):
+    """获取当前行情参与者配置"""
+    try:
+        feed = feed_handlers.get(symbol)
+        if feed is not None:
+            current = feed.get_participant_config()
+        else:
+            from ..data.participants import ParticipantRegistry
+            registry = ParticipantRegistry(symbol=symbol, base_price=10.50)
+            current = registry.get_config()
+        return OrderResponse(
+            code=0,
+            message="success",
+            data={"config": current, "symbol": symbol},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─────────── 持久化 API ───────────
+
+@app.post("/api/v1/persistence/export", response_model=OrderResponse)
+async def export_persistence(symbol: str = "000001.SZ"):
+    """导出指定标的的订单和成交记录到 CSV"""
+    try:
+        result = persistence.export_to_csv(symbol)
+        return OrderResponse(
+            code=0,
+            message="success",
+            data={"export_result": result},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/persistence/snapshot", response_model=OrderResponse)
+async def get_persistence_snapshot(symbol: str = "000001.SZ"):
+    """获取持久化的最新订单簿快照"""
+    try:
+        snapshot = persistence.get_latest_snapshot(symbol)
+        return OrderResponse(
+            code=0,
+            message="success",
+            data=snapshot,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

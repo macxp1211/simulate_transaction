@@ -88,17 +88,20 @@ class Level2FeedHandler:
 
 
 class MockLevel2Feed(Level2FeedHandler):
-    """模拟 Level-2 行情生成器（用于测试和演示）
+    """模拟 Level-2 行情生成器（基于多类参与者）
 
-    改进点：
-    - 不再直接生成成交/盘口事件，而是生成模拟委托；
-    - 模拟委托进入撮合引擎订单簿后，与用户委托按价格优先、时间优先规则自动撮合；
-    - 委托价格随随机游走变化，主动买入推高价格、主动卖出推低价格。
+    核心改进：
+    - 使用 ParticipantRegistry 管理多类市场参与者
+    - 每类参与者有独立策略：做市商、趋势跟踪、均值回归、噪声交易、激进交易
+    - 参与者生成的模拟委托进入撮合引擎订单簿，与用户委托自动撮合
+    - 支持目标价格设置，参与者围绕目标价格交易
+    - 支持动态参数调整（数量、频率、目标价格等）
     """
 
     def __init__(self, symbol: str = "000001.SZ", base_price: float = 10.50,
                  order_interval: float = 0.2, quote_interval: float = 1.0,
-                 book_provider: Optional[Callable[[], Optional[dict]]] = None):
+                 book_provider: Optional[Callable[[], Optional[dict]]] = None,
+                 participant_config: Optional[dict] = None):
         super().__init__()
         self.symbol = symbol
         self.base_price = Decimal(str(base_price))
@@ -107,8 +110,25 @@ class MockLevel2Feed(Level2FeedHandler):
         self.book_provider = book_provider
 
         self._current_price = self.base_price
-        self._order_seq = 0
         self._task: Optional[asyncio.Task] = None
+
+        # 参与者注册表
+        from ..data.participants import ParticipantRegistry
+        self.registry = ParticipantRegistry(symbol=symbol, base_price=base_price)
+        if participant_config:
+            self.registry.update_config(participant_config)
+
+    @property
+    def participant_stats(self) -> List[dict]:
+        return self.registry.get_all_stats()
+
+    def update_participant_config(self, config: dict):
+        """动态更新参与者配置"""
+        self.registry.update_config(config)
+
+    def get_participant_config(self) -> dict:
+        """获取当前参与者配置"""
+        return self.registry.get_config()
 
     async def start(self):
         self._running = True
@@ -134,39 +154,54 @@ class MockLevel2Feed(Level2FeedHandler):
             pass
 
     async def _generate_orders(self):
-        """生成模拟委托并推送到订单簿
-
-        生成策略：
-        - 先注入初始双边流动性；
-        - 随后大部分订单为 passive（挂买低于现价/挂卖高于现价），维持盘口深度；
-        - 小比例为 aggressive（买价高于现价/卖价低于现价），主动吃掉对方队列并推动价格。
-        """
-        await self._seed_initial_book()
+        """由参与者生成模拟委托并推送到订单簿"""
+        # 先由做市商注入初始流动性
+        participants = self.registry.get_participants()
+        for p in participants:
+            if hasattr(p, '_seeded'):
+                p._seeded = False
+        # 让前几个 tick 快速初始化
+        for _ in range(5):
+            for p in participants:
+                if not p.active:
+                    continue
+                order = p.generate_order(None)
+                if order:
+                    await self._emit_order(order)
+                    p.on_order_queued(order)
+            await asyncio.sleep(0.05)
 
         while self._running:
             await asyncio.sleep(self.order_interval)
 
             snapshot = self._get_book_snapshot()
-            side, price, quantity = self._decide_next_order(snapshot)
 
-            self._order_seq += 1
-            order = {
-                "symbol": self.symbol,
-                "side": side,
-                "price": str(price),
-                "quantity": quantity,
-                "order_id": f"mock-{self._order_seq}",
-                "timestamp": datetime.now().isoformat(),
-            }
+            for p in participants:
+                if not p.active:
+                    continue
 
-            await self._emit_order(order)
+                # 生成委托
+                order = p.generate_order(snapshot)
+                if order:
+                    await self._emit_order(order)
+                    p.on_order_queued(order)
 
-            # 小概率生成撤单事件，消耗队列并推动位置前移
-            if random.random() < 0.10:
-                await self._generate_cancel(snapshot)
+                # 生成撤单
+                cancel = p.generate_cancel(snapshot)
+                if cancel:
+                    await self._emit_cancel(cancel)
+
+            # 更新当前价格
+            if snapshot:
+                bids = snapshot.get("bids", [])
+                asks = snapshot.get("asks", [])
+                if bids and asks:
+                    self._current_price = (Decimal(str(bids[0]["price"])) + Decimal(str(asks[0]["price"]))) / 2
+                elif bids or asks:
+                    self._current_price = Decimal(str((bids or asks)[0]["price"]))
 
     def _get_book_snapshot(self) -> Optional[dict]:
-        """获取当前订单簿快照，若未提供 provider 则返回 None"""
+        """获取当前订单簿快照"""
         if self.book_provider is None:
             return None
         try:
@@ -174,101 +209,32 @@ class MockLevel2Feed(Level2FeedHandler):
         except Exception:
             return None
 
-    def _decide_next_order(self, snapshot: Optional[dict]) -> Tuple[str, Decimal, int]:
-        """根据当前盘口决定下一笔模拟委托的方向、价格和数量"""
-        # 价格随机游走，限制在 ±10% 以内
-        price_change = Decimal(str(random.uniform(-0.05, 0.05)))
-        self._current_price = max(
-            self.base_price * Decimal("0.9"),
-            min(self.base_price * Decimal("1.1"),
-                self._current_price + price_change)
-        )
-        self._current_price = Decimal(str(round(float(self._current_price), 2)))
+    async def _generate_quotes(self):
+        """由调用方根据引擎订单簿生成盘口快照推送"""
+        while self._running:
+            await asyncio.sleep(self.quote_interval)
+            # Quote 消息由 server.py 根据引擎订单簿快照推送
+            pass
 
-        spread = Decimal("0.02")
-        quantity = random.randint(1, 10) * 100
-
-        bids = snapshot.get("bids", []) if snapshot else []
-        asks = snapshot.get("asks", []) if snapshot else []
-        bid_qty = sum(b["total_quantity"] for b in bids)
-        ask_qty = sum(a["total_quantity"] for a in asks)
-
-        # 优先补充缺失的一侧流动性
-        if not asks or ask_qty < bid_qty * 0.5:
-            side = "sell"
-            price = self._current_price + spread
-        elif not bids or bid_qty < ask_qty * 0.5:
-            side = "buy"
-            price = self._current_price - spread
-        else:
-            # 两侧流动性充足时，随机选择方向；小概率生成 aggressive 订单
-            side = random.choice(["buy", "sell"])
-            aggressive = random.random() < 0.20
-            if side == "buy":
-                price = self._current_price + spread if aggressive else self._current_price - spread
-            else:
-                price = self._current_price - spread if aggressive else self._current_price + spread
-
-        return side, price, quantity
-
-    async def _generate_cancel(self, snapshot: Optional[dict]):
-        """生成行情撤单事件，消耗订单簿队列并推动 current_queue_position 前移"""
-        if not snapshot:
-            return
-
-        # 选择有深度的一侧进行撤单
+    async def _generate_cancel(self, book_snapshot=None):
+        """兼容测试：直接生成一个行情撤单"""
         side = random.choice(["buy", "sell"])
-        levels = snapshot.get("bids" if side == "buy" else "asks", [])
-        if not levels:
-            side = "sell" if side == "buy" else "buy"
-            levels = snapshot.get("bids" if side == "buy" else "asks", [])
-        if not levels:
-            return
-
-        level = levels[0]
-        cancel_qty = random.randint(1, 5) * 100
-        cancel_qty = min(cancel_qty, level["total_quantity"])
-        if cancel_qty <= 0:
-            return
-
+        price = self._current_price or self.base_price
+        quantity = random.randint(100, 1000)
+        if book_snapshot:
+            entries = book_snapshot.get("bids" if side == "buy" else "asks", [])
+            if entries:
+                price = Decimal(str(entries[0]["price"]))
+                quantity = random.randint(1, int(entries[0].get("total_quantity", 1000)))
         cancel = {
             "symbol": self.symbol,
             "side": side,
-            "price": str(Decimal(str(level["price"]))),
-            "quantity": cancel_qty,
-            "timestamp": datetime.now().isoformat(),
+            "price": str(price),
+            "quantity": quantity,
+            "order_id": f"mock-cancel-{uuid.uuid4().hex[:8]}",
         }
         await self._emit_cancel(cancel)
 
-    async def _seed_initial_book(self):
-        """注入初始双边流动性，确保启动后盘口两侧均有挂单"""
-        spread = Decimal("0.02")
-        for i in range(1, 6):
-            self._order_seq += 1
-            await self._emit_order({
-                "symbol": self.symbol,
-                "side": "buy",
-                "price": str(self._current_price - spread * i),
-                "quantity": random.randint(3, 12) * 100,
-                "order_id": f"mock-{self._order_seq}",
-                "timestamp": datetime.now().isoformat(),
-            })
-            self._order_seq += 1
-            await self._emit_order({
-                "symbol": self.symbol,
-                "side": "sell",
-                "price": str(self._current_price + spread * i),
-                "quantity": random.randint(3, 12) * 100,
-                "order_id": f"mock-{self._order_seq}",
-                "timestamp": datetime.now().isoformat(),
-            })
-
-    async def _generate_quotes(self):
-        """由调用方根据自身订单簿生成盘口快照，此处仅保留占位循环"""
-        while self._running:
-            await asyncio.sleep(self.quote_interval)
-            # Quote 消息现在由 server.py 根据引擎订单簿快照推送
-            pass
 
 
 class FileReplayFeed(Level2FeedHandler):

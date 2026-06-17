@@ -50,14 +50,70 @@
             </div>
         </div>
 
+        <!-- 参与者配置面板 -->
         <div class="chart-container">
-            <h3>活跃标的列表</h3>
-            <table class="engines-table">
-                <thead>
-                    <tr><th>标的</th><th>状态</th><th>委托数</th><th>成交数</th><th>排队数</th><th>操作</th></tr>
-                </thead>
-                <tbody id="enginesTable"></tbody>
-            </table>
+            <h3>行情参与者配置</h3>
+            <div class="config-panel">
+                <div class="config-row">
+                    <div class="config-group">
+                        <label>标的代码</label>
+                        <input type="text" id="configSymbol" value="000001.SZ" class="config-input">
+                    </div>
+                    <div class="config-group">
+                        <label>目标价格</label>
+                        <input type="number" id="configTargetPrice" value="10.50" step="0.01" class="config-input">
+                    </div>
+                    <div class="config-group">
+                        <label>订单间隔(秒)</label>
+                        <input type="number" id="configInterval" value="0.2" step="0.1" min="0.05" class="config-input">
+                    </div>
+                </div>
+                <div class="config-row">
+                    <div class="config-group">
+                        <label>做市商数量</label>
+                        <input type="number" id="configMMCount" value="2" min="0" max="10" class="config-input">
+                    </div>
+                    <div class="config-group">
+                        <label>趋势跟踪者</label>
+                        <input type="number" id="configTFCount" value="1" min="0" max="10" class="config-input">
+                    </div>
+                    <div class="config-group">
+                        <label>均值回归者</label>
+                        <input type="number" id="configMRCount" value="1" min="0" max="10" class="config-input">
+                    </div>
+                    <div class="config-group">
+                        <label>噪声交易者</label>
+                        <input type="number" id="configNTCount" value="3" min="0" max="20" class="config-input">
+                    </div>
+                    <div class="config-group">
+                        <label>激进交易者</label>
+                        <input type="number" id="configATCount" value="1" min="0" max="10" class="config-input">
+                    </div>
+                </div>
+                <div class="config-actions">
+                    <button id="applyConfigBtn" class="btn-submit">应用配置</button>
+                    <button id="resetConfigBtn" class="btn-small">重置默认</button>
+                </div>
+            </div>
+            <div id="configResult" class="result"></div>
+        </div>
+
+        <!-- 价格走势图 -->
+        <div class="chart-container">
+            <h3>实时价格走势 <span id="chartSymbol" class="symbol-tag">000001.SZ</span></h3>
+            <div class="chart-toolbar">
+                <input type="text" id="chartSymbolInput" value="000001.SZ" class="symbol-input" placeholder="输入标的">
+                <button id="refreshChartBtn" class="btn-small">刷新</button>
+            </div>
+            <canvas id="priceChart" width="800" height="300" style="width:100%;max-height:300px;background:#fff;border-radius:4px;"></canvas>
+        </div>
+
+        <!-- 逐笔成交流水 -->
+        <div class="chart-container">
+            <h3>逐笔成交流水</h3>
+            <div class="trade-stream" id="tradeStream" style="max-height:300px;overflow-y:auto;font-size:12px;">
+                <div style="color:#999;padding:20px">暂无成交数据</div>
+            </div>
         </div>
 
         <div class="chart-container">
@@ -92,11 +148,31 @@
         </div>
 
         <div class="chart-container">
+            <h3>活跃标的列表</h3>
+            <table class="engines-table">
+                <thead>
+                    <tr><th>标的</th><th>状态</th><th>委托数</th><th>成交数</th><th>排队数</th><th>操作</th></tr>
+                </thead>
+                <tbody id="enginesTable"></tbody>
+            </table>
+        </div>
+
+        <div class="chart-container">
+            <h3>参与者状态</h3>
+            <table class="engines-table" id="participantTable">
+                <thead>
+                    <tr><th>ID</th><th>类型</th><th>状态</th><th>发送订单</th><th>成交数</th><th>待成交</th></tr>
+                </thead>
+                <tbody id="participantTableBody"></tbody>
+            </table>
+        </div>
+
+        <div class="chart-container">
             <h3>实时日志</h3>
             <div class="log-list" id="monitorLogList" style="max-height:300px;overflow-y:auto;font-family:monospace;font-size:12px;"></div>
         </div>
     </div>
 
-    <script src="/static/js/monitor.js?v=5"></script>
+    <script src="/static/js/monitor.js?v=6"></script>
 </body>
 </html>

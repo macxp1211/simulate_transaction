@@ -208,7 +208,31 @@ nav a:hover, nav a.active {
 .engines-table th { text-align: left; padding: 10px; border-bottom: 1px solid var(--border-color); color: var(--text-secondary); font-weight: 500; }
 .engines-table td { padding: 10px; border-bottom: 1px solid var(--border-color); }
 
+/* 配置面板 */
+.config-panel { display: flex; flex-direction: column; gap: 16px; }
+.config-row { display: flex; flex-wrap: wrap; gap: 16px; }
+.config-group { display: flex; flex-direction: column; gap: 4px; }
+.config-group label { font-size: 12px; color: var(--text-secondary); font-weight: 500; }
+.config-input { padding: 8px 10px; border: 1px solid var(--border-color); border-radius: 4px; font-size: 13px; width: 120px; }
+.config-input:focus { outline: none; border-color: var(--color-accent); }
+.config-actions { display: flex; gap: 10px; margin-top: 4px; }
+
+/* 走势图 */
+.chart-toolbar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }
+
+/* 逐笔成交流水 */
+.trade-stream { font-family: monospace; }
+.trade-stream-item { display: flex; justify-content: space-between; padding: 4px 8px; border-bottom: 1px solid var(--border-color); }
+.trade-stream-item:last-child { border-bottom: none; }
+.trade-stream-item .ts-time { color: var(--text-secondary); font-size: 11px; width: 80px; }
+.trade-stream-item .ts-price { font-weight: 600; width: 80px; }
+.trade-stream-item .ts-qty { width: 60px; }
+.trade-stream-item .ts-side-buy { color: var(--color-buy); }
+.trade-stream-item .ts-side-sell { color: var(--color-sell); }
+.trade-stream-item .ts-source { color: #999; font-size: 11px; }
+
 @media (max-width: 1200px) {
     .main-grid { grid-template-columns: 1fr; }
     .monitor-grid { grid-template-columns: 1fr; }
+    .config-row { flex-direction: column; }
 }
