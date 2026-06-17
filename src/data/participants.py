@@ -131,7 +131,10 @@ class MarketParticipant(ABC):
         self._pending_orders: List[Dict] = []
 
         # 虚拟账户（P&L 跟踪）
-        self.cash = Decimal(str(initial_cash))
+        self.initial_cash = Decimal(str(initial_cash))
+        self.initial_position = initial_position
+        self.initial_price = self.base_price
+        self.cash = self.initial_cash
         self.position = initial_position
         self.frozen_cash = Decimal("0")
         self.frozen_position = 0
@@ -164,6 +167,7 @@ class MarketParticipant(ABC):
             "timestamp": datetime.now().isoformat(),
             "participant_id": self.participant_id,
         }
+        # 冰山订单字段当前仅作记录，订单簿/撮合引擎尚未实现冰山订单刷新逻辑
         if visible_qty is not None and visible_qty < quantity:
             order["iceberg"] = True
             order["visible_quantity"] = visible_qty
@@ -172,7 +176,18 @@ class MarketParticipant(ABC):
 
     def on_order_filled(self, order_id: str, trade_info: Dict):
         self._trade_history.append(trade_info)
-        self._pending_orders = [o for o in self._pending_orders if o["order_id"] != order_id]
+
+        # 仅在订单完全成交或完全撤销后才从 pending 列表移除
+        filled_qty = sum(
+            t.get("quantity", 0)
+            for t in self._trade_history
+            if t.get("order_id") == order_id
+        )
+        pending_order = next((o for o in self._pending_orders if o["order_id"] == order_id), None)
+        total_qty = pending_order["quantity"] if pending_order else trade_info.get("quantity", 0)
+        if filled_qty >= total_qty:
+            self._pending_orders = [o for o in self._pending_orders if o["order_id"] != order_id]
+
         self._update_pnl(trade_info)
         # 更新共享市场状态
         get_shared_market_state().on_trade(trade_info)
@@ -199,15 +214,15 @@ class MarketParticipant(ABC):
 
     @property
     def pnl(self) -> Decimal:
-        """未实现 P&L = 当前持仓按最新价估值 + 现金 - 初始资金"""
+        """已实现 P&L = 当前持仓按最新价估值 + 现金 - 初始资金"""
         latest = get_shared_market_state().latest_price or self._current_price
-        initial = Decimal(str(self._get_initial_value()))
+        initial = self._get_initial_value()
         current = self.cash + latest * self.position
         return current - initial
 
-    def _get_initial_value(self) -> float:
-        # 基类默认，子类可覆盖
-        return 1000000.0
+    def _get_initial_value(self) -> Decimal:
+        """初始资产价值 = 初始现金 + 初始持仓 × 基准价"""
+        return self.initial_cash + self.initial_price * self.initial_position
 
     def get_stats(self) -> Dict:
         return {
@@ -273,7 +288,30 @@ class MarketParticipant(ABC):
         """将价格限制在合理范围内（基于市场规则）"""
         from ..core.market_rules import get_market_rules
         rules = get_market_rules(self.symbol)
-        return rules.clamp_to_limit(price)
+        price = rules.clamp_to_limit(price)
+
+        # 若存在盘口快照，进一步限制在价格笼子范围内
+        if snapshot is not None:
+            bids = snapshot.get("bids", [])
+            asks = snapshot.get("asks", [])
+            benchmark = None
+            if bids or asks:
+                # 使用最优买/卖价的均值作为价格笼子基准
+                best_bid = Decimal(str(bids[0]["price"])) if bids else None
+                best_ask = Decimal(str(asks[0]["price"])) if asks else None
+                if best_bid is not None and best_ask is not None:
+                    benchmark = (best_bid + best_ask) / 2
+                elif best_bid is not None:
+                    benchmark = best_bid
+                elif best_ask is not None:
+                    benchmark = best_ask
+            if benchmark is not None:
+                lower, upper = rules.get_price_cage_bounds(benchmark)
+                if price > upper:
+                    price = upper
+                elif price < lower:
+                    price = lower
+        return price
 
 
 # ─────────── 现有参与者改进版 ───────────
@@ -300,11 +338,14 @@ class MarketMaker(MarketParticipant):
             self._seeded = True
             return self._seed_initial_book()
 
+        if not book_snapshot:
+            return None
+
         # 动态调整 spread
         spread = self._adjust_spread(book_snapshot)
 
-        bids = book_snapshot.get("bids", []) if book_snapshot else []
-        asks = book_snapshot.get("asks", []) if book_snapshot else []
+        bids = book_snapshot.get("bids", [])
+        asks = book_snapshot.get("asks", [])
         best_bid = Decimal(str(bids[0]["price"])) if bids else self._current_price - spread
         best_ask = Decimal(str(asks[0]["price"])) if asks else self._current_price + spread
         self._current_price = (best_bid + best_ask) / 2
@@ -567,11 +608,15 @@ class NoiseTrader(MarketParticipant):
 
         # 散户小额为主，偶尔大单
         low, high = self.quantity_range
+        low = max(100, low)
+        high = max(low, high)
         if random.random() < 0.9:
-            qty = random.randint(max(100, low), min(500, high)) // 100 * 100
+            upper = max(low, min(500, high))
+            qty = random.randint(low // 100, upper // 100) * 100
+            qty = max(100, qty)
         else:
-            qty = random.randint(low, high)
-        qty = max(100, qty)
+            qty = random.randint(low // 100, high // 100) * 100
+            qty = max(100, qty)
 
         price = self._clamp_price(price, book_snapshot)
         return self._create_order(side, price, qty)
@@ -664,13 +709,14 @@ class AlgorithmicTrader(MarketParticipant):
     def __init__(self, algo_type: str = "twap", slice_count: int = 10, **kwargs):
         super().__init__(**kwargs)
         self.algo_type = algo_type  # "twap" 或 "vwap"
-        self.slice_count = slice_count
+        self.slice_count = max(1, slice_count)
         self._target_order: Optional[Dict] = None
         self._slices_remaining = 0
         self._slice_size = 0
         self._slice_side = ""
         self._slice_price = Decimal("0")
         self._tick_count = 0
+        self._total_qty = 0
 
     def generate_order(self, book_snapshot: Optional[Dict]) -> Optional[Dict]:
         # 随机生成新的大单目标（模拟收到算法交易指令）
@@ -689,13 +735,20 @@ class AlgorithmicTrader(MarketParticipant):
         # VWAP: 根据成交量分布（简化：前多后少）
         else:
             expected_progress = 1 - (self._slices_remaining / self.slice_count)
-            if random.random() > expected_progress * 2:
+            # 前期发单概率高，后期低
+            if random.random() > 2 * (1 - expected_progress):
                 return None
 
         # 根据波动率调整 slice 大小：高波动时减小
         vol = self._get_volatility()
         size_factor = max(0.5, 1.0 - float(vol) * 300)
         actual_qty = max(100, int(self._slice_size * size_factor) // 100 * 100)
+
+        # 最后一单补齐剩余数量，避免漏执行
+        if self._slices_remaining == 1:
+            executed = (self.slice_count - self._slices_remaining) * self._slice_size
+            actual_qty = max(100, self._total_qty - executed)
+            actual_qty = (actual_qty // 100) * 100
 
         price = self._slice_price
         if book_snapshot:
@@ -719,15 +772,15 @@ class AlgorithmicTrader(MarketParticipant):
             return
 
         side = random.choice(["buy", "sell"])
-        total_qty = random.randint(50, 200) * 100
-        self._slice_size = max(100, total_qty // self.slice_count // 100 * 100)
+        self._total_qty = random.randint(50, 200) * 100
+        self._slice_size = max(100, self._total_qty // self.slice_count // 100 * 100)
         self._slices_remaining = self.slice_count
         self._slice_side = side
         self._slice_price = mid
         self._tick_count = 0
         self._target_order = {
             "side": side,
-            "total_quantity": total_qty,
+            "total_quantity": self._total_qty,
             "price": mid,
         }
 
@@ -751,7 +804,9 @@ class StopLossTrader(MarketParticipant):
         self._entry_price: Optional[Decimal] = None
         self._stop_price: Optional[Decimal] = None
         self._profit_price: Optional[Decimal] = None
-        self._has_position = False
+        self._position_side: Optional[str] = None
+        self._position_qty: int = 0
+        self._closing_order_id: Optional[str] = None
 
     def generate_order(self, book_snapshot: Optional[Dict]) -> Optional[Dict]:
         if not book_snapshot:
@@ -763,29 +818,54 @@ class StopLossTrader(MarketParticipant):
         self._current_price = mid
 
         # 如果没有持仓，随机开仓
-        if not self._has_position:
+        if self._position_side is None:
             if random.random() < 0.1:
                 side = random.choice(["buy", "sell"])
                 self._entry_price = mid
-                self._stop_price = mid * (Decimal("1") - self.stop_loss_pct) if side == "buy" else mid * (Decimal("1") + self.stop_loss_pct)
-                self._profit_price = mid * (Decimal("1") + self.take_profit_pct) if side == "buy" else mid * (Decimal("1") - self.take_profit_pct)
-                self._has_position = True
+                self._position_qty = self._random_quantity() * 3
+                if side == "buy":
+                    self._stop_price = mid * (Decimal("1") - self.stop_loss_pct)
+                    self._profit_price = mid * (Decimal("1") + self.take_profit_pct)
+                else:
+                    self._stop_price = mid * (Decimal("1") + self.stop_loss_pct)
+                    self._profit_price = mid * (Decimal("1") - self.take_profit_pct)
+                self._position_side = side
                 price = self._clamp_price(mid, book_snapshot)
-                return self._create_order(side, price, self._random_quantity() * 3)
+                return self._create_order(side, price, self._position_qty)
             return None
 
-        # 检查止损/止盈
-        # 假设是买入持仓，需要卖出平仓
-        if self._entry_price and self._stop_price and self._profit_price:
-            # 简单逻辑：假设持仓方向与开仓方向一致
-            # 如果价格 <= 止损价 或 >= 止盈价，市价卖出
+        # 检查止损/止盈，发送平仓单
+        if self._closing_order_id is not None:
+            # 平仓单已发出，等待成交
+            return None
+
+        triggered = False
+        if self._position_side == "buy":
             if mid <= self._stop_price or mid >= self._profit_price:
-                self._has_position = False
-                self._entry_price = None
-                price = self._clamp_price(mid, book_snapshot)
-                return self._create_order("sell", price, self._random_quantity() * 3)
+                triggered = True
+        else:  # short
+            if mid >= self._stop_price or mid <= self._profit_price:
+                triggered = True
+
+        if triggered:
+            close_side = "sell" if self._position_side == "buy" else "buy"
+            price = self._clamp_price(mid, book_snapshot)
+            order = self._create_order(close_side, price, self._position_qty)
+            self._closing_order_id = order["order_id"]
+            return order
 
         return None
+
+    def on_order_filled(self, order_id: str, trade_info: Dict):
+        super().on_order_filled(order_id, trade_info)
+        # 平仓单成交后清空持仓状态
+        if order_id == self._closing_order_id:
+            self._position_side = None
+            self._position_qty = 0
+            self._entry_price = None
+            self._stop_price = None
+            self._profit_price = None
+            self._closing_order_id = None
 
     def generate_cancel(self, book_snapshot: Optional[Dict]) -> Optional[Dict]:
         return None
@@ -909,6 +989,15 @@ class IcebergParticipant(MarketParticipant):
             "timestamp": datetime.now().isoformat(),
             "participant_id": self.participant_id,
         }
+
+    def on_order_filled(self, order_id: str, trade_info: Dict):
+        super().on_order_filled(order_id, trade_info)
+        info = self._iceberg_orders.get(order_id)
+        if info is None:
+            return
+        info["filled_qty"] += trade_info.get("quantity", 0)
+        if info["filled_qty"] >= info["total_qty"]:
+            self._iceberg_orders.pop(order_id, None)
 
 
 # ─────────── 注册表 ───────────

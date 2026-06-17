@@ -777,10 +777,20 @@ async def get_market_rules_api(symbol: str):
     try:
         from ..core.market_rules import get_market_rules
         rules = get_market_rules(symbol)
+        # 基于当前盘口确定价格笼子基准价
+        benchmark = None
+        engine = engine_manager.get_all_engines().get(symbol)
+        if engine:
+            benchmark = (
+                engine.order_book.best_ask
+                or engine.order_book.best_bid
+                or engine._last_trade_price
+                or rules.previous_close
+            )
         return OrderResponse(
             code=0,
             message="success",
-            data=rules.to_dict(),
+            data=rules.to_dict(benchmark=benchmark),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -792,7 +802,7 @@ async def update_market_rules_api(symbol: str, req: MarketRulesUpdateRequest):
     try:
         from ..core.market_rules import get_market_rules, MarketType
         rules = get_market_rules(symbol)
-        if req.previous_close is not None:
+        if req.previous_close is not None and str(req.previous_close).strip() != "":
             rules.previous_close = Decimal(str(req.previous_close))
         if req.market_type is not None:
             try:

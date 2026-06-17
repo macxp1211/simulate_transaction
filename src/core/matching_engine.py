@@ -41,11 +41,13 @@ class SymbolMatchingEngine:
         self.config = config or MatchingConfig()
         self.order_book = OrderBook(symbol)
 
-        # 同步市场规则配置
+        # 同步市场规则配置：全局规则优先于 MatchingConfig 默认值
         from .market_rules import get_market_rules
         rules = get_market_rules(symbol)
-        rules.previous_close = self.config.previous_close
-        rules.market_type = self.config.market_type
+        self.config.previous_close = rules.previous_close
+        self.config.market_type = rules.market_type
+        self.config.price_tick = rules.price_tick
+        self.config.lot_size = rules.lot_size
 
         # 账户与费用模型
         self.account = account
@@ -69,6 +71,9 @@ class SymbolMatchingEngine:
             "trades_from_feed": 0,
             "trades_from_cross": 0,
         }
+
+        # 最新成交价（用于价格笼子基准价回退）
+        self._last_trade_price: Optional[Decimal] = None
 
     def on_trade_generated(self, callback: Callable):
         """注册成交生成回调"""
@@ -177,6 +182,7 @@ class SymbolMatchingEngine:
             else:
                 self._stats["trades_from_feed"] += 1
 
+            self._last_trade_price = trade.price
             await self._update_account_on_trade(trade)
 
             for cb in self._trade_callbacks:
@@ -325,13 +331,14 @@ class SymbolMatchingEngine:
         
         # 根据成交方向消耗队列
         if trade_direction in ("buy", "sell"):
+            self._last_trade_price = trade_price
             trades = self.order_book.consume_queue_on_trade(
                 trade_price, trade_qty, trade_direction, trade_id
             )
             for t in trades:
                 self._stats["trades_generated"] += 1
                 self._stats["trades_from_feed"] += 1
-    
+
     async def _handle_quote(self, quote: dict):
         """处理盘口快照（更新参考价格）"""
         # 盘口快照主要用于监控和验证，不直接驱动撮合
@@ -345,39 +352,28 @@ class SymbolMatchingEngine:
             order.reject_reason = f"标的不匹配: {order.symbol} != {self.symbol}"
             order.update_time = datetime.now()
             return False
-        if order.quantity <= 0:
-            order.status = OrderStatus.REJECTED
-            order.reject_reason = "委托数量必须大于0"
-            order.update_time = datetime.now()
-            return False
-        if order.quantity % self.config.lot_size != 0:
-            order.status = OrderStatus.REJECTED
-            order.reject_reason = f"委托数量必须是 {self.config.lot_size} 的整数倍，当前 {order.quantity}"
-            order.update_time = datetime.now()
-            return False
 
         # 市价单不校验价格规则（价格为虚拟值，仅用于撮合逻辑）
         if order.order_type == OrderType.MARKET:
+            # 但仍需校验数量（每手倍数）
+            rules = get_market_rules(self.symbol)
+            ok, msg = rules.validate_quantity(order.quantity)
+            if not ok:
+                order.status = OrderStatus.REJECTED
+                order.reject_reason = msg
+                order.update_time = datetime.now()
+                return False
             return True
 
-        if order.price <= 0:
-            order.status = OrderStatus.REJECTED
-            order.reject_reason = "委托价格必须大于0"
-            order.update_time = datetime.now()
-            return False
-
-        # 市场规则校验（涨跌停、价格笼子、最小变动）
-        # 注：market_rules 在 __init__ 中同步初始化，后续可通过外部直接更新
+        # 市场规则校验（涨跌停、价格笼子、最小变动、数量）
         rules = get_market_rules(self.symbol)
 
-        # 确定价格笼子基准价
-        benchmark = None
+        # 价格笼子基准价：买入看最优卖价，卖出看最优买价；
+        # 若对手盘不存在，则不启用价格笼子校验（仅校验涨跌停）
         if order.side == Side.BUY:
-            # 买入基准 = 最优卖价 > 最新成交价 > 昨收价
-            benchmark = self.order_book.best_ask or rules.previous_close
+            benchmark = self.order_book.best_ask or self._last_trade_price
         else:
-            # 卖出基准 = 最优买价 > 最新成交价 > 昨收价
-            benchmark = self.order_book.best_bid or rules.previous_close
+            benchmark = self.order_book.best_bid or self._last_trade_price
 
         ok, msg = rules.validate_order(order.price, order.quantity, benchmark)
         if not ok:

@@ -181,9 +181,8 @@ class MarketRules:
         """检查价格是否为最小价格变动单位的整数倍"""
         price = Decimal(str(price))
         tick = self.price_tick
-        # 用模运算检查
-        scaled = price / tick
-        return scaled == scaled.quantize(Decimal("1"))
+        # 使用取模更稳健，避免 Decimal 除法上下文精度问题
+        return (price % tick) == Decimal("0")
 
     def clamp_to_limit(self, price: Decimal) -> Decimal:
         """将价格限制在涨跌停范围内"""
@@ -207,13 +206,23 @@ class MarketRules:
 
     # ─────────── 序列化 ───────────
 
-    def to_dict(self) -> dict:
+    def to_dict(self, benchmark: Optional[Decimal] = None) -> dict:
+        """序列化市场规则
+
+        Args:
+            benchmark: 价格笼子基准价；提供时返回基于该基准的笼子边界
+        """
+        cage_lower, cage_upper = None, None
+        if benchmark is not None:
+            cage_lower, cage_upper = self.get_price_cage_bounds(benchmark)
         return {
             "previous_close": str(self.previous_close),
             "market_type": self.market_type.value,
             "price_limit_ratio": str(self.price_limit_ratio),
             "upper_limit": str(self.upper_limit),
             "lower_limit": str(self.lower_limit),
+            "price_cage_upper": str(cage_upper) if cage_upper is not None else str(self.price_cage_upper),
+            "price_cage_lower": str(cage_lower) if cage_lower is not None else str(self.price_cage_lower),
             "price_tick": str(self.price_tick),
             "lot_size": self.lot_size,
         }

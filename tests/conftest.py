@@ -119,3 +119,11 @@ def funded_account() -> "Account":
 def api_client() -> TestClient:
     """FastAPI 测试客户端"""
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def clear_market_rules_fixture():
+    """每个测试用例前清理全局市场规则，避免状态污染"""
+    from src.core.market_rules import clear_market_rules
+    clear_market_rules()
+    yield
