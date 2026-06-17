@@ -190,12 +190,14 @@ class SymbolMatchingEngine:
         if order.side == Side.BUY:
             if order.frozen_total is not None:
                 return
+            # 市价单使用盘口估算价，限价单使用委托价
+            estimated_price = self._estimate_price_for_account(order)
             estimated_fee = self.fee_calculator.estimate_for_buy(
-                order.price, order.remaining_qty
+                estimated_price, order.remaining_qty
             )
-            total = order.price * Decimal(order.remaining_qty) + estimated_fee
+            total = estimated_price * Decimal(order.remaining_qty) + estimated_fee
             order.frozen_total = self.account.on_buy_queued(
-                order.remaining_qty, order.price, estimated_fee
+                order.remaining_qty, estimated_price, estimated_fee
             )
         else:
             if order.frozen_position_qty is not None:
@@ -344,12 +346,12 @@ class SymbolMatchingEngine:
             return True
 
         if order.side == Side.BUY:
-            # 市价买入使用 best_ask 估算，限价买入使用委托价
-            estimated_price = self._estimate_price_for_account(order)
-            estimated_fee = self.fee_calculator.estimate_for_buy(
-                estimated_price, order.remaining_qty
+            # 市价买入按对手盘完整深度估算最坏情况成本，限价买入使用委托价
+            total_cost = (
+                self._estimate_market_cost(order)
+                if order.order_type == OrderType.MARKET
+                else self._estimate_limit_cost(order)
             )
-            total_cost = estimated_price * Decimal(order.remaining_qty) + estimated_fee
             if not self.account.can_buy(total_cost):
                 order.status = OrderStatus.REJECTED
                 order.reject_reason = (
@@ -371,6 +373,32 @@ class SymbolMatchingEngine:
 
         return True
 
+    def _estimate_limit_cost(self, order: Order) -> Decimal:
+        """估算限价买入总成本"""
+        estimated_fee = self.fee_calculator.estimate_for_buy(order.price, order.remaining_qty)
+        return order.price * Decimal(order.remaining_qty) + estimated_fee
+
+    def _estimate_market_cost(self, order: Order) -> Decimal:
+        """估算市价买入最坏情况总成本（从最优价开始吃到足够数量）"""
+        if order.side != Side.BUY:
+            return Decimal("0")
+        remaining = order.remaining_qty
+        total_cost = Decimal("0")
+        for price in self.order_book._get_ask_keys():
+            level = self.order_book.asks[price]
+            qty = min(remaining, level.total_quantity)
+            fee = self.fee_calculator.calculate("buy", price, qty)
+            total_cost += price * Decimal(qty) + fee
+            remaining -= qty
+            if remaining <= 0:
+                break
+        if remaining > 0:
+            # 对手盘不足，按当前最优卖价估算剩余（若无可按涨停价）
+            last_price = self.order_book.best_ask or Decimal("999999.99")
+            fee = self.fee_calculator.calculate("buy", last_price, remaining)
+            total_cost += last_price * Decimal(remaining) + fee
+        return total_cost
+
     def _estimate_price_for_account(self, order: Order) -> Decimal:
         """为账户校验估算成交价格"""
         if order.order_type == OrderType.MARKET:
@@ -386,25 +414,18 @@ class SymbolMatchingEngine:
         """提交委托"""
         if not self._running or (self._task and self._task.done()):
             await self.start()
-        await self._event_queue.put({"type": "order", "order": order})
-        # 等待处理完成（简单轮询）
-        for _ in range(100):
-            if order.status != OrderStatus.PENDING:
-                break
-            await asyncio.sleep(0.001)
+        done = asyncio.Event()
+        await self._event_queue.put({"type": "order", "order": order, "_done": done})
+        await done.wait()
         return order
-    
+
     async def cancel_order(self, order_id: str) -> Optional[Order]:
         """撤销委托"""
         if not self._running or (self._task and self._task.done()):
             await self.start()
-        await self._event_queue.put({"type": "cancel", "order_id": order_id})
-        # 等待处理完成（轮询检查状态）
-        for _ in range(100):
-            order = self.order_book.get_order(order_id)
-            if order and order.status == OrderStatus.CANCELLED:
-                break
-            await asyncio.sleep(0.001)
+        done = asyncio.Event()
+        await self._event_queue.put({"type": "cancel", "order_id": order_id, "_done": done})
+        await done.wait()
         return self.order_book.get_order(order_id)
     
     async def process_trade(self, trade_data: dict):

@@ -240,23 +240,21 @@ class OrderBook:
         
         trades: List[TradeRecord] = []
         
-        # 市价单直接按最优价格处理
-        if order.order_type == OrderType.MARKET:
-            if order.side == Side.BUY:
-                order.price = self.best_ask or Decimal("999999.99")
-            else:
-                order.price = self.best_bid or Decimal("0.01")
-        
         # 检查是否价格交叉（立即撮合）
         if order.side == Side.BUY:
             trades = self._match_buy(order)
         else:
             trades = self._match_sell(order)
-        
-        # 如果有剩余未成交，进入队列
+
+        # 如果有剩余未成交：限价单进入队列，市价单剩余部分撤销
         if order.remaining_qty > 0 and order.is_active:
-            self._enter_queue(order)
-        
+            if order.order_type == OrderType.MARKET:
+                order.cancelled_qty = order.remaining_qty
+                order.status = OrderStatus.FILLED if order.filled_qty > 0 else OrderStatus.CANCELLED
+                order.update_time = datetime.now()
+            else:
+                self._enter_queue(order)
+
         return order.status, trades
     
     def _match_buy(self, order: Order) -> List[TradeRecord]:
