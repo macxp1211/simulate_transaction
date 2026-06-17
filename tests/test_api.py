@@ -255,6 +255,7 @@ class TestAPI:
             "side": "buy",
             "price": "999999.99",
             "quantity": 100000,
+            "order_type": "market",
         })
 
         assert response.status_code == 400

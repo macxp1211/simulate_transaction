@@ -85,6 +85,13 @@ class TestOrderBookConsumeQueueOnCancel:
 class TestMatchingEngineCancelFeed:
     @pytest.mark.asyncio
     async def test_process_cancel_feed_advances_user_position(self, manager):
+        # 先创建引擎（这会初始化市场规则），然后重新设置
+        from src.core.market_rules import get_market_rules, MarketType
+        engine = await manager.get_or_create_engine("000001.SZ")
+        rules = get_market_rules("000001.SZ")
+        rules.previous_close = Decimal("10.00")
+        rules.market_type = MarketType.MAIN_BOARD
+
         # Seed passive sell depth above user's buy price so buy order queues
         for _ in range(3):
             await manager.place_order(Order(

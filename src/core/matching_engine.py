@@ -10,6 +10,7 @@ from .order import Order, Side, OrderStatus, TradeRecord, OrderType
 from .order_book import OrderBook
 from .fee import FeeCalculator, AShareFeeCalculator
 from .account import Account
+from .market_rules import get_market_rules, MarketType
 
 
 @dataclass
@@ -19,8 +20,11 @@ class MatchingConfig:
     lot_size: int = 100
     max_queue_depth: int = 10000
     enable_queue_simulation: bool = True
-    price_limit_up: Decimal = Decimal("1.10")   # 涨停比例
-    price_limit_down: Decimal = Decimal("0.90") # 跌停比例
+    # 以下字段已迁移到 market_rules，保留以保证兼容性
+    price_limit_up: Decimal = Decimal("1.10")
+    price_limit_down: Decimal = Decimal("0.90")
+    market_type: MarketType = MarketType.MAIN_BOARD
+    previous_close: Decimal = Decimal("10.50")
 
 
 class SymbolMatchingEngine:
@@ -36,6 +40,12 @@ class SymbolMatchingEngine:
         self.symbol = symbol
         self.config = config or MatchingConfig()
         self.order_book = OrderBook(symbol)
+
+        # 同步市场规则配置
+        from .market_rules import get_market_rules
+        rules = get_market_rules(symbol)
+        rules.previous_close = self.config.previous_close
+        rules.market_type = self.config.market_type
 
         # 账户与费用模型
         self.account = account
@@ -329,15 +339,53 @@ class SymbolMatchingEngine:
         pass
     
     def _validate_order(self, order: Order) -> bool:
-        """校验委托参数"""
+        """校验委托参数，包括市场规则（涨跌停、价格笼子、最小变动等）"""
         if order.symbol != self.symbol:
+            order.status = OrderStatus.REJECTED
+            order.reject_reason = f"标的不匹配: {order.symbol} != {self.symbol}"
+            order.update_time = datetime.now()
             return False
         if order.quantity <= 0:
+            order.status = OrderStatus.REJECTED
+            order.reject_reason = "委托数量必须大于0"
+            order.update_time = datetime.now()
             return False
         if order.quantity % self.config.lot_size != 0:
+            order.status = OrderStatus.REJECTED
+            order.reject_reason = f"委托数量必须是 {self.config.lot_size} 的整数倍，当前 {order.quantity}"
+            order.update_time = datetime.now()
             return False
-        if order.price <= 0 and order.order_type == OrderType.LIMIT:
+
+        # 市价单不校验价格规则（价格为虚拟值，仅用于撮合逻辑）
+        if order.order_type == OrderType.MARKET:
+            return True
+
+        if order.price <= 0:
+            order.status = OrderStatus.REJECTED
+            order.reject_reason = "委托价格必须大于0"
+            order.update_time = datetime.now()
             return False
+
+        # 市场规则校验（涨跌停、价格笼子、最小变动）
+        # 注：market_rules 在 __init__ 中同步初始化，后续可通过外部直接更新
+        rules = get_market_rules(self.symbol)
+
+        # 确定价格笼子基准价
+        benchmark = None
+        if order.side == Side.BUY:
+            # 买入基准 = 最优卖价 > 最新成交价 > 昨收价
+            benchmark = self.order_book.best_ask or rules.previous_close
+        else:
+            # 卖出基准 = 最优买价 > 最新成交价 > 昨收价
+            benchmark = self.order_book.best_bid or rules.previous_close
+
+        ok, msg = rules.validate_order(order.price, order.quantity, benchmark)
+        if not ok:
+            order.status = OrderStatus.REJECTED
+            order.reject_reason = msg
+            order.update_time = datetime.now()
+            return False
+
         return True
 
     def _validate_account_constraints(self, order: Order) -> bool:

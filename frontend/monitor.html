@@ -74,6 +74,56 @@
             </div>
         </div>
 
+        <!-- 市场规则配置 -->
+        <div class="chart-container">
+            <h3>市场规则配置</h3>
+            <div class="config-panel">
+                <div class="config-row">
+                    <div class="config-group">
+                        <label>标的代码</label>
+                        <input type="text" id="rulesSymbol" value="000001.SZ" class="config-input">
+                    </div>
+                    <div class="config-group">
+                        <label>昨收价</label>
+                        <input type="number" id="rulesPreviousClose" value="10.50" step="0.01" class="config-input">
+                    </div>
+                    <div class="config-group">
+                        <label>市场类型</label>
+                        <select id="rulesMarketType" class="config-input">
+                            <option value="main_board">主板 (±10%)</option>
+                            <option value="st_board">ST (±5%)</option>
+                            <option value="star_market">科创板 (±20%)</option>
+                            <option value="chinext">创业板 (±20%)</option>
+                            <option value="bse">北交所 (±30%)</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="config-row">
+                    <div class="config-group">
+                        <label>涨停价</label>
+                        <input type="text" id="rulesUpperLimit" class="config-input" readonly style="background:#f0fff4;color:#48bb78;font-weight:600;">
+                    </div>
+                    <div class="config-group">
+                        <label>跌停价</label>
+                        <input type="text" id="rulesLowerLimit" class="config-input" readonly style="background:#fff5f5;color:#f56565;font-weight:600;">
+                    </div>
+                    <div class="config-group">
+                        <label>价格笼子上限</label>
+                        <input type="text" id="rulesCageUpper" class="config-input" readonly style="background:#fff;">
+                    </div>
+                    <div class="config-group">
+                        <label>价格笼子下限</label>
+                        <input type="text" id="rulesCageLower" class="config-input" readonly style="background:#fff;">
+                    </div>
+                </div>
+                <div class="config-actions">
+                    <button id="applyRulesBtn" class="btn-submit">应用规则</button>
+                    <button id="refreshRulesBtn" class="btn-small">刷新</button>
+                </div>
+            </div>
+            <div id="rulesResult" class="result"></div>
+        </div>
+
         <!-- 参与者配置面板 -->
         <div class="chart-container">
             <h3>行情参与者配置</h3>
@@ -94,24 +144,40 @@
                 </div>
                 <div class="config-row">
                     <div class="config-group">
-                        <label>做市商数量</label>
-                        <input type="number" id="configMMCount" value="2" min="0" max="10" class="config-input">
+                        <label>做市商</label>
+                        <input type="number" id="configMMCount" value="2" min="0" max="10" class="config-input" style="width:60px">
                     </div>
                     <div class="config-group">
-                        <label>趋势跟踪者</label>
-                        <input type="number" id="configTFCount" value="1" min="0" max="10" class="config-input">
+                        <label>趋势跟踪</label>
+                        <input type="number" id="configTFCount" value="1" min="0" max="10" class="config-input" style="width:60px">
                     </div>
                     <div class="config-group">
-                        <label>均值回归者</label>
-                        <input type="number" id="configMRCount" value="1" min="0" max="10" class="config-input">
+                        <label>均值回归</label>
+                        <input type="number" id="configMRCount" value="1" min="0" max="10" class="config-input" style="width:60px">
                     </div>
                     <div class="config-group">
-                        <label>噪声交易者</label>
-                        <input type="number" id="configNTCount" value="3" min="0" max="20" class="config-input">
+                        <label>噪声交易</label>
+                        <input type="number" id="configNTCount" value="3" min="0" max="20" class="config-input" style="width:60px">
                     </div>
                     <div class="config-group">
-                        <label>激进交易者</label>
-                        <input type="number" id="configATCount" value="1" min="0" max="10" class="config-input">
+                        <label>激进交易</label>
+                        <input type="number" id="configATCount" value="1" min="0" max="10" class="config-input" style="width:60px">
+                    </div>
+                    <div class="config-group">
+                        <label>算法交易</label>
+                        <input type="number" id="configALGOCount" value="1" min="0" max="10" class="config-input" style="width:60px">
+                    </div>
+                    <div class="config-group">
+                        <label>止损交易</label>
+                        <input type="number" id="configSLCount" value="1" min="0" max="10" class="config-input" style="width:60px">
+                    </div>
+                    <div class="config-group">
+                        <label>不平衡</label>
+                        <input type="number" id="configOBICount" value="1" min="0" max="10" class="config-input" style="width:60px">
+                    </div>
+                    <div class="config-group">
+                        <label>冰山订单</label>
+                        <input type="number" id="configICECount" value="1" min="0" max="10" class="config-input" style="width:60px">
                     </div>
                 </div>
                 <div class="config-actions">
@@ -138,6 +204,35 @@
             <div class="trade-stream" id="tradeStream" style="max-height:300px;overflow-y:auto;font-size:12px;">
                 <div style="color:#999;padding:20px">暂无成交数据</div>
             </div>
+        </div>
+
+        <!-- 订单流分析 -->
+        <div class="chart-container">
+            <h3>订单流分析 <span id="flowSymbol" class="symbol-tag">000001.SZ</span></h3>
+            <div class="chart-toolbar">
+                <input type="text" id="flowSymbolInput" value="000001.SZ" class="symbol-input" placeholder="输入标的">
+                <button id="refreshFlowBtn" class="btn-small">刷新</button>
+            </div>
+            <div class="flow-stats" id="flowStats" style="display:flex;gap:20px;margin-bottom:12px;font-size:13px;">
+                <div>买盘深度: <span id="flowBidDepth" style="font-weight:600;color:#48bb78">--</span></div>
+                <div>卖盘深度: <span id="flowAskDepth" style="font-weight:600;color:#f56565">--</span></div>
+                <div>不平衡度: <span id="flowImbalance" style="font-weight:600">--</span></div>
+                <div>价差: <span id="flowSpread" style="font-weight:600">--</span></div>
+            </div>
+            <div class="imbalance-bar" id="imbalanceBar" style="height:24px;background:#e2e8f0;border-radius:4px;overflow:hidden;position:relative;">
+                <div id="imbalanceFill" style="height:100%;width:50%;background:#4299e1;transition:width 0.5s;"></div>
+                <span style="position:absolute;top:0;left:50%;transform:translateX(-50%);font-size:11px;line-height:24px;color:#fff;font-weight:600;">平衡</span>
+            </div>
+        </div>
+
+        <!-- 深度图 -->
+        <div class="chart-container">
+            <h3>深度图 <span id="depthSymbol" class="symbol-tag">000001.SZ</span></h3>
+            <div class="chart-toolbar">
+                <input type="text" id="depthSymbolInput" value="000001.SZ" class="symbol-input" placeholder="输入标的">
+                <button id="refreshDepthBtn" class="btn-small">刷新</button>
+            </div>
+            <canvas id="depthChart" width="800" height="300" style="width:100%;max-height:300px;background:#fff;border-radius:4px;"></canvas>
         </div>
 
         <div class="chart-container">
@@ -178,6 +273,16 @@
                     <tr><th>标的</th><th>状态</th><th>委托数</th><th>成交数</th><th>排队数</th><th>操作</th></tr>
                 </thead>
                 <tbody id="enginesTable"></tbody>
+            </table>
+        </div>
+
+        <div class="chart-container">
+            <h3>参与者 P&L 排名</h3>
+            <table class="engines-table" id="pnlTable">
+                <thead>
+                    <tr><th>排名</th><th>ID</th><th>类型</th><th>现金</th><th>持仓</th><th>P&L</th><th>交易次数</th><th>累计费用</th></tr>
+                </thead>
+                <tbody id="pnlTableBody"></tbody>
             </table>
         </div>
 

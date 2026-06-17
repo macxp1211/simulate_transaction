@@ -106,12 +106,19 @@ class ParticipantConfigRequest(BaseModel):
     noise_trader_count: Optional[int] = None
     aggressive_trader_count: Optional[int] = None
     order_interval: Optional[float] = None
+    algorithmic_trader_count: Optional[int] = None
+    stop_loss_trader_count: Optional[int] = None
+    order_book_imbalance_count: Optional[int] = None
+    iceberg_participant_count: Optional[int] = None
 
 class ParticipantConfigResponse(BaseModel):
     code: int = 0
     message: str = "success"
     data: Optional[dict] = None
 
+class MarketRulesUpdateRequest(BaseModel):
+    previous_close: Optional[str] = Field(default=None, description="昨收价，如 10.50")
+    market_type: Optional[str] = Field(default=None, description="市场类型: main_board/st_board/star_market/chinext/bse")
 
 class AccountResetRequest(BaseModel):
     initial_cash: Optional[str] = Field(default=None, description="初始现金，如 1000000.00")
@@ -679,6 +686,14 @@ async def update_participant_config(req: ParticipantConfigRequest):
             config["aggressive_trader_count"] = req.aggressive_trader_count
         if req.order_interval is not None:
             config["order_interval"] = req.order_interval
+        if req.algorithmic_trader_count is not None:
+            config["algorithmic_trader_count"] = req.algorithmic_trader_count
+        if req.stop_loss_trader_count is not None:
+            config["stop_loss_trader_count"] = req.stop_loss_trader_count
+        if req.order_book_imbalance_count is not None:
+            config["order_book_imbalance_count"] = req.order_book_imbalance_count
+        if req.iceberg_participant_count is not None:
+            config["iceberg_participant_count"] = req.iceberg_participant_count
 
         # 同步更新全局配置缓存，确保行情源重建后仍使用用户设置
         cached = participant_config_cache.setdefault(symbol, {})
@@ -749,6 +764,157 @@ async def get_persistence_snapshot(symbol: str = "000001.SZ"):
             code=0,
             message="success",
             data=snapshot,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─────────── 市场规则 API ───────────
+
+@app.get("/api/v1/market/rules/{symbol}", response_model=OrderResponse)
+async def get_market_rules_api(symbol: str):
+    """获取某标的的市场规则（涨跌停、价格笼子等）"""
+    try:
+        from ..core.market_rules import get_market_rules
+        rules = get_market_rules(symbol)
+        return OrderResponse(
+            code=0,
+            message="success",
+            data=rules.to_dict(),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/market/rules/{symbol}", response_model=OrderResponse)
+async def update_market_rules_api(symbol: str, req: MarketRulesUpdateRequest):
+    """更新某标的的市场规则"""
+    try:
+        from ..core.market_rules import get_market_rules, MarketType
+        rules = get_market_rules(symbol)
+        if req.previous_close is not None:
+            rules.previous_close = Decimal(str(req.previous_close))
+        if req.market_type is not None:
+            try:
+                rules.market_type = MarketType(req.market_type)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"未知市场类型: {req.market_type}")
+        # 同步更新引擎配置
+        engine = engine_manager.get_all_engines().get(symbol)
+        if engine:
+            engine.config.previous_close = rules.previous_close
+            engine.config.market_type = rules.market_type
+        return OrderResponse(
+            code=0,
+            message="success",
+            data=rules.to_dict(),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─────────── 分析 API ───────────
+
+@app.get("/api/v1/analytics/order_flow/{symbol}", response_model=OrderResponse)
+async def get_order_flow_analytics(symbol: str):
+    """获取订单流分析指标"""
+    try:
+        engine = engine_manager.get_all_engines().get(symbol)
+        if engine is None:
+            return OrderResponse(code=0, message="success", data={"symbol": symbol, "note": "引擎未启动"})
+        snapshot = engine.get_orderbook_snapshot(depth=10)
+        bids = snapshot.get("bids", [])
+        asks = snapshot.get("asks", [])
+        bid_depth = sum(b.get("total_quantity", 0) for b in bids)
+        ask_depth = sum(a.get("total_quantity", 0) for a in asks)
+        total_depth = bid_depth + ask_depth
+        imbalance = (bid_depth - ask_depth) / total_depth if total_depth > 0 else 0.0
+        spread = snapshot.get("spread")
+        best_bid = snapshot.get("best_bid")
+        best_ask = snapshot.get("best_ask")
+        return OrderResponse(
+            code=0,
+            message="success",
+            data={
+                "symbol": symbol,
+                "bid_depth": bid_depth,
+                "ask_depth": ask_depth,
+                "total_depth": total_depth,
+                "imbalance": round(imbalance, 4),
+                "spread": spread,
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "bid_levels": len(bids),
+                "ask_levels": len(asks),
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/analytics/participants/pnl", response_model=OrderResponse)
+async def get_participants_pnl(symbol: Optional[str] = None):
+    """获取参与者 P&L 排名"""
+    try:
+        all_stats = []
+        for sym, feed in feed_handlers.items():
+            if symbol and sym != symbol:
+                continue
+            all_stats.extend(feed.participant_stats)
+        # 按 P&L 排序
+        all_stats.sort(key=lambda x: x.get("pnl", 0), reverse=True)
+        return OrderResponse(
+            code=0,
+            message="success",
+            data={"participants": all_stats, "count": len(all_stats)},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/analytics/depth/{symbol}", response_model=OrderResponse)
+async def get_depth_chart_data(symbol: str):
+    """获取深度图数据（买卖盘累积深度）"""
+    try:
+        engine = engine_manager.get_all_engines().get(symbol)
+        if engine is None:
+            return OrderResponse(code=0, message="success", data={"symbol": symbol, "note": "引擎未启动"})
+        snapshot = engine.get_orderbook_snapshot(depth=20)
+        bids = snapshot.get("bids", [])
+        asks = snapshot.get("asks", [])
+        # 买盘累积深度（从最高价格往下累积）
+        bid_depths = []
+        cumulative = 0
+        for b in bids:
+            cumulative += b.get("total_quantity", 0)
+            bid_depths.append({
+                "price": b.get("price"),
+                "quantity": b.get("total_quantity"),
+                "cumulative": cumulative,
+            })
+        # 卖盘累积深度（从最低价格往上累积）
+        ask_depths = []
+        cumulative = 0
+        for a in reversed(asks):
+            cumulative += a.get("total_quantity", 0)
+            ask_depths.insert(0, {
+                "price": a.get("price"),
+                "quantity": a.get("total_quantity"),
+                "cumulative": cumulative,
+            })
+        return OrderResponse(
+            code=0,
+            message="success",
+            data={
+                "symbol": symbol,
+                "bid_depths": bid_depths,
+                "ask_depths": ask_depths,
+                "best_bid": snapshot.get("best_bid"),
+                "best_ask": snapshot.get("best_ask"),
+                "spread": snapshot.get("spread"),
+            },
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

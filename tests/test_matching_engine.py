@@ -164,7 +164,7 @@ class TestMatchingEngineManager:
         order = Order(
             symbol="600519.SH",
             side=Side.BUY,
-            price=Decimal("1000.00"),
+            price=Decimal("10.50"),
             quantity=1000,
         )
         
@@ -183,7 +183,7 @@ class TestMatchingEngineManager:
             order = Order(
                 symbol=symbol,
                 side=Side.BUY,
-                price=Decimal("100.00"),
+                price=Decimal("10.50"),
                 quantity=1000,
             )
             orders.append(manager.place_order(order))
@@ -231,12 +231,13 @@ class TestMatchingEngineManager:
     @pytest.mark.asyncio
     async def test_buy_rejected_insufficient_cash(self, manager):
         """买入因资金不足被拒绝"""
-        # 使用远超账户资金的金额
+        # 使用远超账户资金的金额（市价单，跳过价格规则校验）
         order = Order(
             symbol="000001.SZ",
             side=Side.BUY,
             price=Decimal("999999.99"),
             quantity=10000,
+            order_type=OrderType.MARKET,
         )
         result = await manager.place_order(order)
 
