@@ -1,25 +1,49 @@
 # 高精度队列模拟撮合系统
 
-> 基于 Level-2 逐笔成交和盘口行情的高精度队列模拟撮合系统
+> 基于 Level-2 逐笔成交和盘口行情的高精度队列模拟撮合系统，支持多类市场参与者模拟、账户 T+1 冻结管理、实时行情监控与持久化回放。
 
 ## 系统特性
 
-- **逐笔驱动撮合**：基于真实 Level-2 逐笔成交数据驱动撮合逻辑
+- **逐笔驱动撮合**：基于 Level-2 逐笔成交数据驱动撮合逻辑
 - **价格优先 + 时间优先**：严格遵循交易所撮合规则
-- **队列模拟**：非最优价委托进入队列排队，记录队列长度和位置
+- **队列模拟**：非最优价委托进入队列排队，记录队列长度、位置和等待时间
 - **行情触发消耗**：当逐笔成交价格优于或等于队列价格时，按 FIFO 消耗队列
-- **实时 API**：支持 REST API 和 WebSocket 实时推送
-- **前端委托界面**：可视化委托提交、实时订单簿、订单状态跟踪
-- **监控面板**：引擎统计、活跃标的、实时日志
-- **完整测试体系**：81 项测试覆盖单元测试、集成测试、端到端测试、性能基准
-- **高精度**：委托处理延迟 < 1ms，逐笔响应延迟 < 1ms
+- **多类市场参与者**：做市商、趋势跟踪者、均值回归者、噪声交易者、激进交易者
+- **A股账户模型**：支持 T+1 仓位、挂单冻结现金/仓位、买入费用、日终结算
+- **实时 API**：REST API + WebSocket 实时推送行情、成交、盘口快照
+- **前端委托终端**：可视化委托提交、实时订单簿、我的订单、成交记录
+- **监控面板**：引擎统计、参与者配置、账户初始设置、实时价格走势、逐笔成交流水、实时日志
+- **持久化层**：SQLite 异步持久化订单、成交、账户快照、结算记录
+- **完整测试体系**：109 项测试覆盖单元测试、集成测试、端到端测试、性能基准
 
 ## 架构概览
 
 ```
-Level-2 行情源 → 行情解析 → 撮合引擎 → 订单簿 → 队列管理 → 成交记录
-                     ↓
-              外部委托 API (REST/WebSocket)
+┌─────────────────────────────────────────────────────────────┐
+│                    外部客户端 / 策略系统                      │
+│              (REST API / WebSocket / 前端页面)               │
+└──────────────────┬──────────────────────────────────────────┘
+                   │ 委托下单 / 撤单 / 查询 / 行情订阅
+┌──────────────────▼──────────────────────────────────────────┐
+│                    API Gateway (FastAPI)                      │
+│  • 委托接收与校验  • 订单查询  • 行情配置  • 实时推送          │
+└──────────────────┬──────────────────────────────────────────┘
+                   │
+┌──────────────────▼──────────────────────────────────────────┐
+│                    撮合核心引擎 (Matching Engine)              │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐    │
+│  │  订单簿       │  │  账户模型    │  │  撮合执行器       │    │
+│  │  OrderBook   │  │   Account    │  │ MatchingEngine │    │
+│  └──────────────┘  └──────────────┘  └──────────────────┘    │
+└──────────────────┬──────────────────────────────────────────┘
+                   │
+┌──────────────────▼──────────────────────────────────────────┐
+│                    Level-2 行情接入层                          │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐    │
+│  │  模拟行情源  │  │  参与者注册表│  │  文件回放/WebSocket│   │
+│  │ MockLevel2Feed│  │ParticipantRegistry│  │   (预留)         │   │
+│  └──────────────┘  └──────────────┘  └──────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## 快速开始
@@ -36,9 +60,20 @@ pip install -r requirements.txt
 python main.py
 ```
 
+或直接使用 uvicorn：
+
+```bash
+python -m uvicorn src.api.server:app --host 0.0.0.0 --port 8000
+```
+
 服务将在 `http://localhost:8000` 启动。
 
-### 3. API 文档
+### 3. 访问前端
+
+- **委托终端**: http://localhost:8000/static/index.html
+- **监控面板**: http://localhost:8000/static/monitor.html
+
+### 4. API 文档
 
 启动后访问：
 - Swagger UI: http://localhost:8000/docs
@@ -46,52 +81,45 @@ python main.py
 
 ## 核心接口
 
-### 提交委托
+### 委托接口
 
-```bash
-curl -X POST "http://localhost:8000/api/v1/orders" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "symbol": "000001.SZ",
-    "side": "buy",
-    "price": "10.50",
-    "quantity": 1000,
-    "order_type": "limit"
-  }'
-```
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/v1/orders` | 提交委托 |
+| DELETE | `/api/v1/orders/{order_id}` | 撤销委托 |
+| GET | `/api/v1/orders/{order_id}` | 查询单笔委托 |
+| GET | `/api/v1/orders` | 查询委托列表 |
 
-响应示例：
-```json
-{
-  "code": 0,
-  "message": "success",
-  "data": {
-    "order_id": "ord-abc123",
-    "symbol": "000001.SZ",
-    "side": "buy",
-    "price": "10.50",
-    "quantity": 1000,
-    "filled_qty": 0,
-    "status": "queued",
-    "queue_info": {
-      "queue_length_at_enter": 15,
-      "queue_position_at_enter": 15,
-      "current_queue_length": 15,
-      "current_queue_position": 15,
-      "enter_queue_time": "2024-06-16T10:30:00.123456",
-      "queue_wait_ms": 0
-    }
-  }
-}
-```
+### 行情与查询接口
 
-### 查询订单簿
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/orderbook/{symbol}` | 查询订单簿 |
+| GET | `/api/v1/trades` | 查询成交记录 |
+| GET | `/api/v1/symbols` | 活跃标的列表 |
+| GET | `/api/v1/stats/{symbol}` | 标的统计信息 |
+| GET | `/api/v1/market/trade_history` | 实时成交历史 |
+| GET | `/api/v1/market/price_history` | 价格历史 |
 
-```bash
-curl "http://localhost:8000/api/v1/orderbook/000001.SZ"
-```
+### 账户接口
 
-### WebSocket 订阅行情
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/account` | 查询账户快照 |
+| POST | `/api/v1/account/settle` | 日终结算（今日买入转可用） |
+| POST | `/api/v1/account/reset` | 重置账户（可设初始现金/持仓） |
+
+### 行情参与者配置接口
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/market/participants` | 参与者状态 |
+| GET | `/api/v1/market/participants/config` | 获取当前配置 |
+| POST | `/api/v1/market/participants/config` | 更新参与者配置 |
+
+配置项包括：目标价格、订单间隔、做市商数量、趋势跟踪者数量、均值回归者数量、噪声交易者数量、激进交易者数量。
+
+### WebSocket 订阅
 
 ```javascript
 const ws = new WebSocket("ws://localhost:8000/ws/v1");
@@ -106,6 +134,57 @@ ws.onmessage = (event) => {
   console.log(JSON.parse(event.data));
 };
 ```
+
+## 前端页面
+
+### 委托终端 (`/static/index.html`)
+
+- 提交限价/市价买入卖出委托
+- 实时展示订单簿买卖盘
+- 我的订单列表与状态
+- 实时成交记录
+- 实时日志
+- 顶部账户栏：现金、可用仓、冻结仓、累计费用
+
+### 监控面板 (`/static/monitor.html`)
+
+- 全局统计卡片：委托接收数、成交笔数、排队订单、活跃引擎数等
+- **账户初始设置**：设置初始现金与初始可用持仓，一键重置账户
+- **行情参与者配置**：动态调整目标价格、订单间隔、各类参与者数量
+- 实时价格走势图
+- 逐笔成交流水
+- 实时订单簿
+- 活跃标的列表
+- 参与者状态表
+- 实时日志
+
+## 账户系统
+
+系统采用 A股风格的账户模型：
+
+- **cash**: 可用现金
+- **frozen_cash**: 买入挂单已冻结资金
+- **available_position**: 可用底仓（可立即卖出）
+- **frozen_position**: 卖出挂单已冻结仓位
+- **today_bought_position**: 今日买入仓位（T+1，日终结算后转入可用底仓）
+- **total_fees**: 累计交易费用
+- **trade_count**: 成交笔数
+
+买入委托会按委托价格 + 预估费用冻结现金；卖出委托会冻结可用仓位。成交后根据实际成交价格和费用结算，解冻多余资金/仓位。
+
+## 行情参与者
+
+模拟行情由多类参与者生成，每类参与者有独立策略：
+
+| 类型 | 标识 | 策略 |
+|------|------|------|
+| 做市商 | MM | 双向挂盘，维持盘口深度 |
+| 趋势跟踪者 | TF | 跟随价格趋势顺势交易 |
+| 均值回归者 | MR | 价格偏离均线时反向交易 |
+| 噪声交易者 | NT | 随机方向、随机价格、高撤单概率 |
+| 激进交易者 | AT | 大单主动吃盘，冲击市场 |
+
+参与者配置会持久化到全局缓存，即使所有 WebSocket 客户端断开、行情源重建后仍然保留。
 
 ## 撮合逻辑
 
@@ -125,9 +204,9 @@ ws.onmessage = (event) => {
 
 ### 逐笔成交驱动队列消耗
 
-当收到新的逐笔成交时：
-- **买方主动成交（外盘）**：消耗卖方队列中价格 <= 成交价的订单
-- **卖方主动成交（内盘）**：消耗买方队列中价格 >= 成交价的订单
+当收到新的逐笔成交或模拟委托成交时：
+- **买方主动成交**：消耗卖方队列中价格 <= 成交价的订单
+- **卖方主动成交**：消耗买方队列中价格 >= 成交价的订单
 
 ## 项目结构
 
@@ -135,20 +214,33 @@ ws.onmessage = (event) => {
 ├── docs/
 │   ├── architecture.md      # 系统架构设计
 │   ├── api_spec.md          # API 接口规范
-│   └── matching_logic.md    # 撮合逻辑详细说明
+│   ├── matching_logic.md    # 撮合逻辑详细说明
+│   └── optimization_report.md # 性能优化报告
+├── frontend/
+│   ├── index.html           # 委托终端
+│   ├── monitor.html         # 监控面板
+│   ├── css/
+│   └── js/
+│       ├── app.js           # 委托终端逻辑
+│       └── monitor.js       # 监控面板逻辑
 ├── src/
 │   ├── core/
-│   │   ├── order.py         # 订单模型
+│   │   ├── order.py         # 订单与成交模型
 │   │   ├── order_book.py    # 订单簿
-│   │   └── matching_engine.py  # 撮合引擎
+│   │   ├── matching_engine.py # 撮合引擎
+│   │   ├── account.py       # 账户模型
+│   │   └── fee.py           # 费用计算
 │   ├── data/
 │   │   ├── market_data.py   # 行情数据模型
-│   │   └── level2_feed.py   # Level-2 行情接入
+│   │   ├── level2_feed.py   # Level-2 行情接入
+│   │   └── participants.py  # 行情参与者
 │   ├── api/
 │   │   └── server.py        # FastAPI 服务
+│   ├── persistence/
+│   │   └── persistence.py   # SQLite 持久化
 │   └── utils/
 │       └── config.py        # 配置管理
-├── tests/                    # 测试用例
+├── tests/                    # 测试用例（109 项）
 ├── main.py                   # 启动入口
 ├── requirements.txt          # 依赖
 └── README.md                 # 本文件
@@ -159,6 +251,24 @@ ws.onmessage = (event) => {
 - [系统架构设计](docs/architecture.md)
 - [API 接口规范](docs/api_spec.md)
 - [撮合逻辑详细说明](docs/matching_logic.md)
+- [性能优化报告](docs/optimization_report.md)
+
+## 测试
+
+运行全部测试：
+
+```bash
+python -m pytest tests/ -q
+```
+
+测试覆盖：
+- 账户模型冻结/成交/结算
+- 订单簿撮合与队列消耗
+- 撮合引擎事件循环
+- 行情参与者行为
+- REST API 集成
+- 端到端委托流程
+- 性能基准
 
 ## 技术栈
 
@@ -166,7 +276,9 @@ ws.onmessage = (event) => {
 - **FastAPI** - 高性能异步 Web 框架
 - **uvicorn** - ASGI 服务器
 - **sortedcontainers** - 高效有序字典（用于订单簿价格索引）
+- **pydantic** - 数据模型校验
 - **asyncio** - 异步事件驱动
+- **SQLite** - 本地持久化
 
 ## 性能指标
 
@@ -179,12 +291,14 @@ ws.onmessage = (event) => {
 
 ## 扩展计划
 
-- [x] 端到端测试体系（81 项测试）
+- [x] 端到端测试体系（109 项测试）
 - [x] 前端可视化委托界面
 - [x] 后端撮合监控面板
-- [x] 架构优化报告
-- [ ] Redis 持久化支持
-- [ ] 真实 Level-2 行情源接入（腾讯、新浪、券商接口）
+- [x] 多类市场参与者模拟
+- [x] A股账户模型（T+1、冻结、费用）
+- [x] SQLite 持久化支持
+- [x] 参与者配置持久化
+- [ ] 真实 Level-2 行情源接入（券商/行情商接口）
 - [ ] 文件回放回测模式
 - [ ] 多节点集群部署
 - [ ] 监控和告警（Prometheus/Grafana）
