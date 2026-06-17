@@ -250,10 +250,11 @@ class PersistenceManager:
 
     # ─────────── 订单簿快照持久化 ───────────
 
-    def save_snapshot(self, snapshot: dict):
-        """保存订单簿快照"""
+    def save_snapshot(self, snapshot: dict, max_keep: int = 100):
+        """保存订单簿快照，每个 symbol 最多保留 max_keep 条历史"""
         bids = snapshot.get("bids", [])
         asks = snapshot.get("asks", [])
+        symbol = snapshot.get("symbol")
         with sqlite3.connect(self._db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -262,7 +263,7 @@ class PersistenceManager:
                     bid_levels, ask_levels, total_bid_qty, total_ask_qty
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                snapshot.get("symbol"),
+                symbol,
                 datetime.now().isoformat(),
                 snapshot.get("best_bid"),
                 snapshot.get("best_ask"),
@@ -272,6 +273,17 @@ class PersistenceManager:
                 sum(b["total_quantity"] for b in bids),
                 sum(a["total_quantity"] for a in asks),
             ))
+            # 清理过期快照，按 symbol 只保留最新的 max_keep 条
+            if symbol:
+                cursor.execute("""
+                    DELETE FROM snapshots
+                    WHERE id IN (
+                        SELECT id FROM snapshots
+                        WHERE symbol = ?
+                        ORDER BY snapshot_time DESC
+                        LIMIT -1 OFFSET ?
+                    )
+                """, (symbol, max_keep))
             conn.commit()
 
     def get_latest_snapshot(self, symbol: str) -> Optional[dict]:

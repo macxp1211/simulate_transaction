@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import List, Optional, Dict
 from datetime import datetime
 import asyncio
+import concurrent.futures
 import os
 
 from ..core.order import Order, Side, OrderType, OrderStatus
@@ -39,6 +40,16 @@ account = Account(initial_position=100000)
 fee_calculator = AShareFeeCalculator()
 engine_manager = MatchingEngineManager(account=account, fee_calculator=fee_calculator)
 persistence = PersistenceManager(data_dir="data")
+
+# 用于执行同步持久化 IO 的线程池，避免阻塞 asyncio 事件循环
+_persistence_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="persistence")
+
+
+async def _run_persistence(method, *args):
+    """在线程池中执行同步持久化方法"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_persistence_executor, method, *args)
+
 
 # 行情源（模拟）
 feed_handlers: Dict[str, MockLevel2Feed] = {}
@@ -118,11 +129,18 @@ async def startup_event():
     async def on_trade_generated(trade):
         # 广播给 WebSocket 订阅者
         await _broadcast_trade(trade)
-        # 保存到持久化
+        # 保存到持久化（在线程池中执行，避免阻塞事件循环）
         try:
-            persistence.save_trade(trade.to_dict())
+            await _run_persistence(persistence.save_trade, trade.to_dict())
+            # 同时持久化该笔成交对应订单的最新状态
+            engine = engine_manager.get_all_engines().get(trade.symbol)
+            order = engine.get_order(trade.order_id) if engine else None
+            if order:
+                await _run_persistence(persistence.save_order, order.to_dict())
+                # 通知对应参与者订单已成交，清理其 pending 列表
+                _notify_participant_filled(trade.order_id, trade.to_dict())
         except Exception as e:
-            print(f"[Persistence] save trade error: {e}")
+            print(f"[Persistence] save trade/order error: {e}")
         # 缓存到成交历史
         trade_dict = trade.to_dict()
         trade_history_cache.append(trade_dict)
@@ -162,6 +180,24 @@ async def _broadcast_trade(trade):
         await ws_manager.send_to(cid, message)
 
 
+def _notify_participant_filled(order_id: str, trade_info: dict):
+    """当参与者生成的 mock 订单成交时，通知对应参与者清理 pending 列表"""
+    # order_id 形如 "MM-1-000001"，前缀为 participant_id
+    # 先尝试从 feed 的 registry 中查找
+    for feed in feed_handlers.values():
+        participant = feed.registry.get_participant(order_id)
+        if participant:
+            participant.on_order_filled(order_id, trade_info)
+            return
+        # 按前缀匹配
+        if "-" in order_id:
+            prefix = order_id.rsplit("-", 1)[0]
+            participant = feed.registry.get_participant(prefix)
+            if participant:
+                participant.on_order_filled(order_id, trade_info)
+                return
+
+
 # 标的 -> 盘口快照广播任务
 quote_broadcast_tasks: Dict[str, asyncio.Task] = {}
 
@@ -183,7 +219,7 @@ async def _persistence_snapshot_loop():
             for symbol, engine in engine_manager.get_all_engines().items():
                 try:
                     snapshot = engine.get_orderbook_snapshot(depth=10)
-                    persistence.save_snapshot(snapshot)
+                    await _run_persistence(persistence.save_snapshot, snapshot)
                 except Exception as e:
                     print(f"[Persistence] snapshot error {symbol}: {e}")
         except asyncio.CancelledError:
@@ -233,6 +269,12 @@ async def create_order(req: OrderRequest):
         
         result = await engine_manager.place_order(order)
 
+        # 持久化订单（成功/拒绝均记录）
+        try:
+            await _run_persistence(persistence.save_order, result.to_dict())
+        except Exception as e:
+            print(f"[Persistence] save order error: {e}")
+
         if result.status == OrderStatus.REJECTED:
             detail = result.reject_reason or "委托被拒绝"
             raise HTTPException(status_code=400, detail=detail)
@@ -267,6 +309,12 @@ async def cancel_order(order_id: str, symbol: Optional[str] = None):
         
         if result is None:
             raise HTTPException(status_code=404, detail="Order not found or already filled/cancelled")
+
+        # 持久化撤单后的订单状态
+        try:
+            await _run_persistence(persistence.save_order, result.to_dict())
+        except Exception as e:
+            print(f"[Persistence] save cancel order error: {e}")
         
         return CancelResponse(
             code=0,
@@ -500,10 +548,10 @@ async def settle_account():
             raise HTTPException(status_code=404, detail="Account not found")
 
         acc.settle()
-        # 保存结算记录到持久化
+        # 保存结算记录到持久化（在线程池中执行）
         try:
             for symbol in engine_manager.get_all_engines().keys():
-                persistence.save_settlement(symbol, acc.to_dict())
+                await _run_persistence(persistence.save_settlement, symbol, acc.to_dict())
         except Exception as e:
             print(f"[Persistence] settle save error: {e}")
         return OrderResponse(

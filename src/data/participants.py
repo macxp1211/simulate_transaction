@@ -146,8 +146,9 @@ class MarketMaker(MarketParticipant):
     def generate_cancel(self, book_snapshot: Optional[Dict]) -> Optional[Dict]:
         if random.random() > self.cancel_prob or not self._pending_orders:
             return None
-        # 撤掉自己的一个随机订单
+        # 撤掉自己的一个随机订单，并立即从 pending 中移除
         order = random.choice(self._pending_orders)
+        self._pending_orders = [o for o in self._pending_orders if o["order_id"] != order["order_id"]]
         return {
             "symbol": self.symbol,
             "side": order["side"],
@@ -212,12 +213,14 @@ class TrendFollower(MarketParticipant):
         if momentum > 0:
             # 上涨趋势，买入
             side = "buy"
-            # 越强的趋势挂越高的价格（更激进）
-            price = self._current_price + self.momentum_threshold * Decimal("100") * Decimal(str(random.uniform(0.5, 1.5)))
+            # 越强的趋势挂越高的价格（更激进），但偏移控制在价格的 0.5%~3% 以内
+            offset = self._current_price * self.momentum_threshold * Decimal(str(random.uniform(2.0, 10.0)))
+            price = self._current_price + offset
         else:
             # 下跌趋势，卖出
             side = "sell"
-            price = self._current_price - self.momentum_threshold * Decimal("100") * Decimal(str(random.uniform(0.5, 1.5)))
+            offset = self._current_price * self.momentum_threshold * Decimal(str(random.uniform(2.0, 10.0)))
+            price = self._current_price - offset
 
         # 大单
         qty = self._random_quantity() * random.randint(2, 5)
@@ -228,6 +231,7 @@ class TrendFollower(MarketParticipant):
         if random.random() > 0.02 or not self._pending_orders:
             return None
         order = random.choice(self._pending_orders)
+        self._pending_orders = [o for o in self._pending_orders if o["order_id"] != order["order_id"]]
         return {
             "symbol": self.symbol,
             "side": order["side"],
@@ -303,6 +307,7 @@ class MeanReversionTrader(MarketParticipant):
         if random.random() > 0.05 or not self._pending_orders:
             return None
         order = random.choice(self._pending_orders)
+        self._pending_orders = [o for o in self._pending_orders if o["order_id"] != order["order_id"]]
         return {
             "symbol": self.symbol,
             "side": order["side"],
@@ -351,11 +356,13 @@ class NoiseTrader(MarketParticipant):
             # 正常随机波动
             price = self._current_price + Decimal(str(random.uniform(-0.10, 0.10)))
 
-        # 散户小额为主，偶尔大单
+        # 散户小额为主，偶尔大单，但尊重 quantity_range
+        low, high = self.quantity_range
         if random.random() < 0.9:
-            qty = random.randint(1, 5) * 100
+            qty = random.randint(max(100, low), min(500, high)) // 100 * 100
         else:
-            qty = random.randint(10, 30) * 100
+            qty = random.randint(low, high)
+        qty = max(100, qty)
 
         return self._create_order(side, price, qty)
 
@@ -363,6 +370,7 @@ class NoiseTrader(MarketParticipant):
         if random.random() > self.cancel_prob or not self._pending_orders:
             return None
         order = random.choice(self._pending_orders)
+        self._pending_orders = [o for o in self._pending_orders if o["order_id"] != order["order_id"]]
         return {
             "symbol": self.symbol,
             "side": order["side"],
@@ -537,6 +545,8 @@ class ParticipantRegistry:
                     p.target_price = Decimal(str(config["target_price"]))
                 if "active" in config:
                     p.active = config["active"]
+                if "order_interval" in config:
+                    p.order_interval = config["order_interval"]
 
     def get_config(self) -> Dict:
         return self._config.copy()
