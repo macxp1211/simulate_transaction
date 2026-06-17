@@ -207,6 +207,8 @@ async def startup_event():
     asyncio.create_task(_persistence_snapshot_loop())
     # 启动价格历史广播任务
     asyncio.create_task(_price_history_broadcast_loop())
+    # 启动排行榜计算任务
+    asyncio.create_task(_leaderboard_loop())
 
 
 async def _broadcast_trade(trade):
@@ -291,6 +293,49 @@ async def _price_history_broadcast_loop():
             print(f"[PriceHistory] broadcast error: {e}")
 
 
+async def _leaderboard_loop():
+    """定期计算并广播排行榜"""
+    while True:
+        try:
+            await asyncio.sleep(10.0)
+            await _compute_and_broadcast_leaderboard()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"[Leaderboard] loop error: {e}")
+
+
+async def _compute_and_broadcast_leaderboard():
+    """计算所有行情源的参与者排行榜并持久化/广播"""
+    from src.core.leaderboard import compute_participant_rankings
+
+    for symbol, feed in list(feed_handlers.items()):
+        participants = feed.registry.get_participants()
+        if not participants:
+            continue
+        rankings = compute_participant_rankings(participants)
+        if not rankings:
+            continue
+
+        # 持久化
+        try:
+            await _run_persistence(persistence.save_leaderboard, symbol, rankings)
+        except Exception as e:
+            print(f"[Persistence] save leaderboard error: {e}")
+
+        # 广播给订阅了该标的的客户端
+        message = {
+            "type": "leaderboard",
+            "symbol": symbol,
+            "data": rankings,
+        }
+        for cid in list(market_subscribers.get(symbol, set())):
+            try:
+                await ws_manager.send_to(cid, message)
+            except Exception as e:
+                print(f"[Leaderboard] broadcast to {cid} error: {e}")
+
+
 # ─────────── REST API ───────────
 
 @app.post("/api/v1/orders", response_model=OrderResponse)
@@ -332,8 +377,6 @@ async def create_order(req: OrderRequest):
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -832,11 +875,6 @@ async def update_market_rules_api(symbol: str, req: MarketRulesUpdateRequest):
                 rules.market_type = MarketType(req.market_type)
             except ValueError:
                 raise HTTPException(status_code=400, detail=f"未知市场类型: {req.market_type}")
-        # 同步更新引擎配置
-        engine = engine_manager.get_all_engines().get(symbol)
-        if engine:
-            engine.config.previous_close = rules.previous_close
-            engine.config.market_type = rules.market_type
         return OrderResponse(
             code=0,
             message="success",
@@ -844,6 +882,66 @@ async def update_market_rules_api(symbol: str, req: MarketRulesUpdateRequest):
         )
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─────────── 排行榜 API ───────────
+
+class MarketRegimeRequest(BaseModel):
+    regime: str = Field(..., description="市场模式：normal / flash_crash / pump")
+
+
+@app.get("/api/v1/leaderboard/{symbol}", response_model=OrderResponse)
+async def get_leaderboard_api(symbol: str):
+    """获取某标的的最新排行榜"""
+    try:
+        from src.core.leaderboard import compute_participant_rankings
+        feed = feed_handlers.get(symbol)
+        if feed is not None:
+            rankings = compute_participant_rankings(feed.registry.get_participants())
+        else:
+            rankings = persistence.get_latest_leaderboard(symbol=symbol)
+        return OrderResponse(
+            code=0,
+            message="success",
+            data={"symbol": symbol, "rankings": rankings},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/market/regime/{symbol}", response_model=OrderResponse)
+async def set_market_regime_api(symbol: str, req: MarketRegimeRequest):
+    """切换市场微观结构模式"""
+    try:
+        feed = feed_handlers.get(symbol)
+        if feed is None:
+            raise HTTPException(status_code=404, detail=f"标的 {symbol} 行情源未启动")
+        feed.set_market_regime(req.regime)
+        return OrderResponse(
+            code=0,
+            message="success",
+            data={"symbol": symbol, "regime": req.regime},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/market/regime/{symbol}", response_model=OrderResponse)
+async def get_market_regime_api(symbol: str):
+    """获取当前市场微观结构模式"""
+    try:
+        feed = feed_handlers.get(symbol)
+        if feed is None:
+            return OrderResponse(code=0, message="success", data={"symbol": symbol, "regime": "normal"})
+        return OrderResponse(
+            code=0,
+            message="success",
+            data={"symbol": symbol, "regime": feed.market_regime},
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

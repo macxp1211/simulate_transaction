@@ -29,6 +29,7 @@ class SharedMarketState:
         self.trade_volume_buys: int = 0  # 买入成交量
         self.trade_volume_sells: int = 0  # 卖出成交量
         self._max_history = 200
+        self.regime: str = "normal"  # 市场微观结构模式：normal / flash_crash / pump
 
     def on_trade(self, trade: Dict):
         """记录成交，更新市场状态"""
@@ -143,6 +144,9 @@ class MarketParticipant(ABC):
         self._pending_orders: List[Dict] = []
         self._max_pending_orders = 200
 
+        # P&L 历史（用于计算最大回撤、夏普等）
+        self._pnl_history: List[Decimal] = []
+
         # 虚拟账户（P&L 跟踪）
         self.initial_cash = Decimal(str(initial_cash))
         self.initial_position = initial_position
@@ -208,6 +212,11 @@ class MarketParticipant(ABC):
         # 限制 trade history 内存占用
         if len(self._trade_history) > self._max_trade_history:
             self._trade_history = self._trade_history[-self._max_trade_history // 2:]
+
+        # 记录 P&L 历史
+        self._pnl_history.append(self.pnl)
+        if len(self._pnl_history) > self._max_trade_history:
+            self._pnl_history = self._pnl_history[-self._max_trade_history // 2:]
 
     def on_order_queued(self, order_dict: Dict):
         self._pending_orders.append(order_dict)

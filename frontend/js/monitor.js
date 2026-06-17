@@ -310,6 +310,42 @@ async function resetAccount() {
 }
 
 // ─────────── 市场规则 ───────────
+async function loadMarketRegime() {
+    const symbol = currentSymbol;
+    try {
+        const data = await apiGet(`/api/v1/market/regime/${symbol}`);
+        if (data.code !== 0) return;
+        const select = document.getElementById('marketRegimeSelect');
+        if (select) select.value = data.data.regime || 'normal';
+    } catch (err) {
+        console.error('加载市场模式失败', err);
+    }
+}
+
+async function applyMarketRegime() {
+    const symbol = currentSymbol;
+    const regime = document.getElementById('marketRegimeSelect').value;
+    try {
+        const data = await apiPost(`/api/v1/market/regime/${symbol}`, { regime });
+        const resultEl = document.getElementById('regimeResult');
+        if (data.code === 0) {
+            if (resultEl) {
+                resultEl.textContent = `已切换至 ${regime}`;
+                resultEl.className = 'result success';
+                setTimeout(() => { resultEl.className = 'result'; resultEl.textContent = ''; }, 3000);
+            }
+            log(`市场模式切换: ${regime}`);
+        } else {
+            if (resultEl) {
+                resultEl.textContent = data.message || '切换失败';
+                resultEl.className = 'result error';
+            }
+        }
+    } catch (err) {
+        console.error('切换市场模式失败', err);
+    }
+}
+
 async function loadMarketRules() {
     const symbol = document.getElementById('rulesSymbol').value.trim() || currentSymbol;
     try {
@@ -469,6 +505,40 @@ async function refreshParticipants() {
     } catch (err) {
         console.error('刷新参与者失败', err);
     }
+}
+
+// ─────────── 排行榜 ───────────
+async function refreshLeaderboard(symbol) {
+    symbol = symbol || currentSymbol;
+    try {
+        const data = await apiGet(`/api/v1/leaderboard/${symbol}`);
+        if (data.code !== 0) return;
+        renderLeaderboard(data.data.rankings || []);
+    } catch (err) {
+        console.error('加载排行榜失败', err);
+    }
+}
+
+function renderLeaderboard(rankings) {
+    const tbody = document.getElementById('leaderboardTableBody');
+    if (!tbody) return;
+    if (!rankings.length) {
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#999;">暂无数据</td></tr>';
+        return;
+    }
+    tbody.innerHTML = rankings.map(r => {
+        const pnlClass = r.pnl >= 0 ? 'color:#48bb78' : 'color:#f56565';
+        return `<tr>
+            <td>${r.rank}</td>
+            <td>${r.participant_id}</td>
+            <td>${r.type}</td>
+            <td style="${pnlClass};font-weight:600">${r.pnl.toFixed(2)}</td>
+            <td>${r.total_trades}</td>
+            <td>${(r.win_rate * 100).toFixed(1)}%</td>
+            <td>${r.max_drawdown.toFixed(2)}</td>
+            <td>${r.sharpe_ratio.toFixed(2)}</td>
+        </tr>`;
+    }).join('');
 }
 
 // ─────────── 参与者 P&L ───────────
@@ -671,6 +741,10 @@ function connectWebSocket() {
                     priceHistory = priceHistory.slice(-maxHistory);
                 }
                 drawPriceChart();
+            } else if (msg.type === 'leaderboard') {
+                if (msg.symbol === currentSymbol) {
+                    renderLeaderboard(msg.data || []);
+                }
             }
         };
         ws.onclose = () => {
@@ -689,12 +763,14 @@ document.addEventListener('DOMContentLoaded', () => {
     refreshCrossStats();
     refreshOrderBook(currentSymbol);
     loadAccountSnapshot();
+    loadMarketRegime();
     loadMarketRules();
     loadParticipantConfig();
     refreshParticipants();
     refreshParticipantsPnl();
     refreshOrderFlow(currentSymbol);
     refreshDepthChart(currentSymbol);
+    refreshLeaderboard(currentSymbol);
     connectWebSocket();
 
     const refreshBtn = document.getElementById('refreshBook');
@@ -726,6 +802,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const resetAccountBtn = document.getElementById('resetAccountBtn');
     if (resetAccountBtn) resetAccountBtn.addEventListener('click', resetAccount);
 
+    // 市场微观结构模式
+    const applyRegimeBtn = document.getElementById('applyRegimeBtn');
+    if (applyRegimeBtn) applyRegimeBtn.addEventListener('click', applyMarketRegime);
+
     // 市场规则
     const applyRulesBtn = document.getElementById('applyRulesBtn');
     if (applyRulesBtn) applyRulesBtn.addEventListener('click', applyMarketRules);
@@ -750,6 +830,21 @@ document.addEventListener('DOMContentLoaded', () => {
                     drawPriceChart();
                 }
             });
+        });
+    }
+
+    const refreshLeaderboardBtn = document.getElementById('refreshLeaderboardBtn');
+    if (refreshLeaderboardBtn) {
+        refreshLeaderboardBtn.addEventListener('click', () => {
+            const sym = document.getElementById('leaderboardSymbolInput').value.trim() || currentSymbol;
+            refreshLeaderboard(sym);
+        });
+    }
+
+    const leaderboardSymbolInput = document.getElementById('leaderboardSymbolInput');
+    if (leaderboardSymbolInput) {
+        leaderboardSymbolInput.addEventListener('change', (e) => {
+            refreshLeaderboard(e.target.value.trim() || currentSymbol);
         });
     }
 
@@ -811,6 +906,7 @@ document.addEventListener('DOMContentLoaded', () => {
         refreshParticipantsPnl();
         refreshOrderFlow(currentSymbol);
         refreshDepthChart(currentSymbol);
+        refreshLeaderboard(currentSymbol);
         loadAccountSnapshot();
     }, 3000);
 });

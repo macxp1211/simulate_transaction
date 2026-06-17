@@ -93,6 +93,20 @@ class PersistenceManager:
                     trade_count INTEGER
                 )
             """)
+            # 排行榜记录
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS leaderboard (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    snapshot_time TEXT,
+                    symbol TEXT,
+                    participant_id TEXT,
+                    pnl TEXT,
+                    total_trades INTEGER,
+                    win_rate REAL,
+                    max_drawdown REAL,
+                    sharpe_ratio REAL
+                )
+            """)
             conn.commit()
 
     # ─────────── 订单持久化 ───────────
@@ -333,6 +347,54 @@ class PersistenceManager:
                 account_dict.get("trade_count", 0),
             ))
             conn.commit()
+
+    # ─────────── 排行榜持久化 ───────────
+
+    def save_leaderboard(self, symbol: str, rankings: List[dict]):
+        """保存排行榜快照"""
+        snapshot_time = datetime.now().isoformat()
+        with sqlite3.connect(self._db_path) as conn:
+            cursor = conn.cursor()
+            for r in rankings:
+                cursor.execute("""
+                    INSERT INTO leaderboard (
+                        snapshot_time, symbol, participant_id, pnl, total_trades,
+                        win_rate, max_drawdown, sharpe_ratio
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    snapshot_time,
+                    symbol,
+                    r.get("participant_id"),
+                    str(r.get("pnl", 0)),
+                    r.get("total_trades", 0),
+                    r.get("win_rate", 0.0),
+                    r.get("max_drawdown", 0.0),
+                    r.get("sharpe_ratio", 0.0),
+                ))
+            conn.commit()
+
+    def get_latest_leaderboard(self, symbol: Optional[str] = None, limit: int = 100) -> List[dict]:
+        """获取最新排行榜快照"""
+        with sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            subq = "SELECT MAX(snapshot_time) FROM leaderboard"
+            params = []
+            if symbol:
+                subq += " WHERE symbol = ?"
+                params.append(symbol)
+            query = f"""
+                SELECT * FROM leaderboard
+                WHERE snapshot_time = ({subq})
+            """
+            if symbol:
+                query += " AND symbol = ?"
+                params.append(symbol)
+            query += " ORDER BY pnl DESC LIMIT ?"
+            params.append(limit)
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
 
     # ─────────── JSON 快照（快速恢复用）───────────
 

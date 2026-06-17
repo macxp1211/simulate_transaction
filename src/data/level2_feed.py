@@ -111,12 +111,26 @@ class MockLevel2Feed(Level2FeedHandler):
 
         self._current_price = self.base_price
         self._task: Optional[asyncio.Task] = None
+        self._regime: str = "normal"
 
         # 参与者注册表
         from ..data.participants import ParticipantRegistry
         self.registry = ParticipantRegistry(symbol=symbol, base_price=base_price)
         if participant_config:
             self.registry.update_config(participant_config)
+
+    @property
+    def market_regime(self) -> str:
+        return self._regime
+
+    def set_market_regime(self, regime: str):
+        """设置市场微观结构模式"""
+        if regime not in ("normal", "flash_crash", "pump"):
+            raise ValueError(f"unknown regime: {regime}")
+        self._regime = regime
+        # 同步到共享市场状态
+        from ..data.participants import get_shared_market_state
+        get_shared_market_state(self.symbol).regime = regime
 
     @property
     def participant_stats(self) -> List[dict]:
@@ -182,6 +196,11 @@ class MockLevel2Feed(Level2FeedHandler):
 
             snapshot = self._get_book_snapshot()
 
+            # 根据市场微观结构模式注入额外冲击订单
+            shock_order = self._generate_shock_order(snapshot)
+            if shock_order:
+                await self._emit_order(shock_order)
+
             # 每次循环重新获取参与者，以便 registry 重建或参数更新后生效
             for p in self.registry.get_participants():
                 if not p.active:
@@ -206,6 +225,30 @@ class MockLevel2Feed(Level2FeedHandler):
                     self._current_price = (Decimal(str(bids[0]["price"])) + Decimal(str(asks[0]["price"]))) / 2
                 elif bids or asks:
                     self._current_price = Decimal(str((bids or asks)[0]["price"]))
+
+    def _generate_shock_order(self, snapshot: Optional[dict]) -> Optional[dict]:
+        """根据 regime 生成冲击订单"""
+        if self._regime == "normal" or not snapshot:
+            return None
+
+        # 闪崩：大额市价卖单；拉涨：大额市价买单
+        side = "sell" if self._regime == "flash_crash" else "buy"
+
+        # 30% 概率每个 tick 产生冲击
+        if random.random() > 0.30:
+            return None
+
+        price = Decimal("0.01") if side == "sell" else Decimal("999999.99")
+        quantity = random.randint(50, 200) * 100  # 大额
+        return {
+            "symbol": self.symbol,
+            "side": side,
+            "price": str(price),
+            "quantity": quantity,
+            "order_id": f"shock-{side}-{uuid.uuid4().hex[:8]}",
+            "participant_id": "SHOCK",
+            "timestamp": datetime.now().isoformat(),
+        }
 
     def _get_book_snapshot(self) -> Optional[dict]:
         """获取当前订单簿快照"""

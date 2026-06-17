@@ -74,6 +74,25 @@
             </div>
         </div>
 
+        <!-- 市场微观结构模式 -->
+        <div class="chart-container">
+            <h3>市场微观结构模式</h3>
+            <div class="config-row">
+                <div class="config-group">
+                    <label>当前模式</label>
+                    <select id="marketRegimeSelect" class="config-input">
+                        <option value="normal">平静期（低波动/高流动性）</option>
+                        <option value="flash_crash">闪崩/猎杀期（高波动/流动性枯竭）</option>
+                        <option value="pump">拉涨/逼空期</option>
+                    </select>
+                </div>
+            </div>
+            <div class="config-actions">
+                <button id="applyRegimeBtn" class="btn-submit">切换模式</button>
+            </div>
+            <div id="regimeResult" class="result"></div>
+        </div>
+
         <!-- 市场规则配置 -->
         <div class="chart-container">
             <h3>市场规则配置</h3>
@@ -204,6 +223,30 @@
             <div class="trade-stream" id="tradeStream" style="max-height:300px;overflow-y:auto;font-size:12px;">
                 <div style="color:#999;padding:20px">暂无成交数据</div>
             </div>
+        </div>
+
+        <!-- 竞技场龙虎榜 -->
+        <div class="chart-container">
+            <h3>竞技场龙虎榜 <span id="leaderboardSymbol" class="symbol-tag">000001.SZ</span></h3>
+            <div class="chart-toolbar">
+                <input type="text" id="leaderboardSymbolInput" value="000001.SZ" class="symbol-input" placeholder="输入标的">
+                <button id="refreshLeaderboardBtn" class="btn-small">刷新</button>
+            </div>
+            <table class="book-table" style="margin-top:8px;">
+                <thead>
+                    <tr>
+                        <th>排名</th>
+                        <th>参与者</th>
+                        <th>类型</th>
+                        <th>收益</th>
+                        <th>交易数</th>
+                        <th>胜率</th>
+                        <th>最大回撤</th>
+                        <th>夏普</th>
+                    </tr>
+                </thead>
+                <tbody id="leaderboardTableBody"></tbody>
+            </table>
         </div>
 
         <!-- 订单流分析 -->
