@@ -15,16 +15,16 @@ from .market_rules import get_market_rules, MarketType
 
 @dataclass
 class MatchingConfig:
-    """撮合配置"""
+    """撮合配置
+
+    注：涨跌停、价格笼子、价格最小变动、每手数量等市场规则已迁移到
+    src.core.market_rules.MarketRules，由全局规则表按 symbol 管理。
+    本配置仅保留撮合行为相关参数。
+    """
     price_tick: Decimal = Decimal("0.01")
     lot_size: int = 100
     max_queue_depth: int = 10000
     enable_queue_simulation: bool = True
-    # 以下字段已迁移到 market_rules，保留以保证兼容性
-    price_limit_up: Decimal = Decimal("1.10")
-    price_limit_down: Decimal = Decimal("0.90")
-    market_type: MarketType = MarketType.MAIN_BOARD
-    previous_close: Decimal = Decimal("10.50")
 
 
 class SymbolMatchingEngine:
@@ -44,8 +44,6 @@ class SymbolMatchingEngine:
         # 同步市场规则配置：全局规则优先于 MatchingConfig 默认值
         from .market_rules import get_market_rules
         rules = get_market_rules(symbol)
-        self.config.previous_close = rules.previous_close
-        self.config.market_type = rules.market_type
         self.config.price_tick = rules.price_tick
         self.config.lot_size = rules.lot_size
 
@@ -338,6 +336,12 @@ class SymbolMatchingEngine:
             for t in trades:
                 self._stats["trades_generated"] += 1
                 self._stats["trades_from_feed"] += 1
+                # 同步到共享市场状态（按 symbol 隔离）
+                try:
+                    from ..data.participants import get_shared_market_state
+                    get_shared_market_state(self.symbol).on_trade(t.to_dict())
+                except Exception:
+                    pass
 
     async def _handle_quote(self, quote: dict):
         """处理盘口快照（更新参考价格）"""

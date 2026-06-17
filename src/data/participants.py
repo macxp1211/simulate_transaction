@@ -50,6 +50,12 @@ class SharedMarketState:
         else:
             self.trade_volume_sells += qty
 
+        # 防止成交量无限增长，超过阈值时衰减
+        total_vol = self.trade_volume_buys + self.trade_volume_sells
+        if total_vol > 1_000_000:
+            self.trade_volume_buys //= 2
+            self.trade_volume_sells //= 2
+
     def on_book_update(self, snapshot: Optional[Dict]):
         """更新订单簿状态"""
         if not snapshot:
@@ -82,17 +88,22 @@ class SharedMarketState:
         return self.price_history[-1] if self.price_history else None
 
 
-# 全局共享市场状态
-_shared_market_state = SharedMarketState()
+# 全局共享市场状态（按 symbol 隔离，避免多标的互相污染）
+_shared_market_states: Dict[str, SharedMarketState] = {}
 
 
-def get_shared_market_state() -> SharedMarketState:
-    return _shared_market_state
+def get_shared_market_state(symbol: str) -> SharedMarketState:
+    if symbol not in _shared_market_states:
+        _shared_market_states[symbol] = SharedMarketState()
+    return _shared_market_states[symbol]
 
 
-def reset_shared_market_state():
-    global _shared_market_state
-    _shared_market_state = SharedMarketState()
+def reset_shared_market_state(symbol: Optional[str] = None):
+    global _shared_market_states
+    if symbol is None:
+        _shared_market_states = {}
+    else:
+        _shared_market_states.pop(symbol, None)
 
 
 # ─────────── 基类 ───────────
@@ -127,8 +138,10 @@ class MarketParticipant(ABC):
         self.active = active
         self._order_seq = 0
         self._trade_history: List[Dict] = []
+        self._max_trade_history = 500
         self._current_price = self.base_price
         self._pending_orders: List[Dict] = []
+        self._max_pending_orders = 200
 
         # 虚拟账户（P&L 跟踪）
         self.initial_cash = Decimal(str(initial_cash))
@@ -190,10 +203,17 @@ class MarketParticipant(ABC):
 
         self._update_pnl(trade_info)
         # 更新共享市场状态
-        get_shared_market_state().on_trade(trade_info)
+        get_shared_market_state(self.symbol).on_trade(trade_info)
+
+        # 限制 trade history 内存占用
+        if len(self._trade_history) > self._max_trade_history:
+            self._trade_history = self._trade_history[-self._max_trade_history // 2:]
 
     def on_order_queued(self, order_dict: Dict):
         self._pending_orders.append(order_dict)
+        # 限制 pending 列表长度，避免内存无限增长
+        if len(self._pending_orders) > self._max_pending_orders:
+            self._pending_orders = self._pending_orders[-self._max_pending_orders // 2:]
 
     def _update_pnl(self, trade_info: Dict):
         """更新虚拟账户 P&L"""
@@ -215,7 +235,7 @@ class MarketParticipant(ABC):
     @property
     def pnl(self) -> Decimal:
         """已实现 P&L = 当前持仓按最新价估值 + 现金 - 初始资金"""
-        latest = get_shared_market_state().latest_price or self._current_price
+        latest = get_shared_market_state(self.symbol).latest_price or self._current_price
         initial = self._get_initial_value()
         current = self.cash + latest * self.position
         return current - initial
@@ -282,7 +302,7 @@ class MarketParticipant(ABC):
         return (bid_depth - ask_depth) / total
 
     def _get_volatility(self) -> Decimal:
-        return get_shared_market_state().current_volatility
+        return get_shared_market_state(self.symbol).current_volatility
 
     def _clamp_price(self, price: Decimal, snapshot: Optional[Dict]) -> Decimal:
         """将价格限制在合理范围内（基于市场规则）"""
@@ -586,8 +606,9 @@ class NoiseTrader(MarketParticipant):
         side = random.choice(["buy", "sell"])
 
         # 追涨杀跌：有 30% 概率跟随最近趋势
-        if random.random() < 0.3 and get_shared_market_state().price_history:
-            trend = get_shared_market_state().price_history[-1] - get_shared_market_state().price_history[0] if len(get_shared_market_state().price_history) > 1 else Decimal("0")
+        sms = get_shared_market_state(self.symbol)
+        if random.random() < 0.3 and sms.price_history:
+            trend = sms.price_history[-1] - sms.price_history[0] if len(sms.price_history) > 1 else Decimal("0")
             if trend > 0:
                 side = "buy" if random.random() < 0.6 else "sell"
             else:
@@ -892,7 +913,7 @@ class OrderBookImbalanceTrader(MarketParticipant):
         # 订单簿不平衡度
         book_imbalance = self._get_imbalance(book_snapshot)
         # 共享市场状态的订单流不平衡度
-        flow_imbalance = get_shared_market_state().order_flow_imbalance
+        flow_imbalance = get_shared_market_state(self.symbol).order_flow_imbalance
 
         # 综合信号：两者同向时信号更强
         combined = book_imbalance * 0.6 + flow_imbalance * 0.4

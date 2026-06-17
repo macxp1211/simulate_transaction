@@ -663,6 +663,14 @@ function connectWebSocket() {
             } else if (msg.type === 'price_history') {
                 priceHistory = msg.data || [];
                 drawPriceChart();
+            } else if (msg.type === 'price_history_delta') {
+                const incoming = msg.data || [];
+                priceHistory = priceHistory.concat(incoming);
+                const maxHistory = 300;
+                if (priceHistory.length > maxHistory) {
+                    priceHistory = priceHistory.slice(-maxHistory);
+                }
+                drawPriceChart();
             }
         };
         ws.onclose = () => {

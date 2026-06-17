@@ -157,6 +157,13 @@ async def startup_event():
         except Exception as e:
             print(f"[Persistence] save trade/order error: {e}")
 
+        # 更新共享市场状态（按 symbol 隔离）
+        try:
+            from src.data.participants import get_shared_market_state
+            get_shared_market_state(trade.symbol).on_trade(trade.to_dict())
+        except Exception as e:
+            print(f"[SharedMarketState] update error: {e}")
+
         # 在日志中记录成交来源（用户订单或 mock 参与者）
         participant_id = order.participant_id if order else None
         source = participant_id or "USER"
@@ -252,17 +259,23 @@ async def _persistence_snapshot_loop():
 
 
 async def _price_history_broadcast_loop():
-    """定期广播价格历史给所有 WebSocket 客户端"""
+    """定期广播最新价格点给所有 WebSocket 客户端（增量推送）"""
+    last_broadcast_idx: Dict[str, int] = {}
     while True:
         try:
             await asyncio.sleep(2.0)
-            for symbol, history in price_history_cache.items():
+            for symbol, history in list(price_history_cache.items()):
                 if not history:
                     continue
+                last_idx = last_broadcast_idx.get(symbol, -1)
+                if len(history) - 1 <= last_idx:
+                    continue
+                new_points = history[last_idx + 1:]
+                last_broadcast_idx[symbol] = len(history) - 1
                 message = {
-                    "type": "price_history",
+                    "type": "price_history_delta",
                     "symbol": symbol,
-                    "data": history,
+                    "data": new_points,
                 }
                 for cid in list(market_subscribers.get(symbol, set())):
                     await ws_manager.send_to(cid, message)
