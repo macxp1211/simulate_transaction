@@ -1,50 +1,163 @@
 # 高精度队列模拟撮合系统
 
-> 基于 Level-2 逐笔成交和盘口行情的高精度队列模拟撮合系统，支持多类市场参与者模拟、账户 T+1 冻结管理、实时行情监控与持久化回放。
+> 基于 Level-2 逐笔成交和盘口行情的高精度队列模拟撮合系统，支持 12 类智能市场参与者、A 股真实交易规则、账户 T+1 冻结管理、延迟注入、市场微观结构 regime 切换、全局排行榜与实时行情监控。
 
 ## 系统特性
 
-- **逐笔驱动撮合**：基于 Level-2 逐笔成交数据驱动撮合逻辑
-- **价格优先 + 时间优先**：严格遵循交易所撮合规则
-- **队列模拟**：非最优价委托进入队列排队，记录队列长度、位置和等待时间
+- **逐笔驱动撮合**：基于 Level-2 逐笔成交数据驱动撮合逻辑，严格遵循价格优先、时间优先
+- **高精度队列模拟**：非最优价委托进入队列排队，记录队列长度、位置和等待时间
 - **行情触发消耗**：当逐笔成交价格优于或等于队列价格时，按 FIFO 消耗队列
-- **多类市场参与者**：做市商、趋势跟踪者、均值回归者、噪声交易者、激进交易者
-- **A股账户模型**：支持 T+1 仓位、挂单冻结现金/仓位、买入费用、日终结算
-- **实时 API**：REST API + WebSocket 实时推送行情、成交、盘口快照
-- **前端委托终端**：可视化委托提交、实时订单簿、我的订单、成交记录
-- **监控面板**：引擎统计、参与者配置、账户初始设置、实时价格走势、逐笔成交流水、实时日志
-- **持久化层**：SQLite 异步持久化订单、成交、账户快照、结算记录
+- **A 股真实规则**：涨跌停限制、价格笼子（2% 基准价范围）、最小变动单位、每手 100 股
+- **12 类智能参与者**：做市商、趋势跟踪、均值回归、噪声交易、激进交易、算法交易、止损止盈、订单簿不平衡、冰山订单、主观方向、筹码收集、日内做 T
+- **外部撤单隔离**：mock 参与者订单标记 `source="external"`，行情撤单只消耗外部匿名订单，保护用户/RL 真实订单
+- **延迟注入器**：可按来源为内部/外部订单注入可调延迟，模拟真实报单通道延迟
+- **市场微观结构 regime**：支持 `normal` / `flash_crash` / `pump` 三种模式，注入大额冲击订单
+- **全局排行榜与结算**：每 10 秒计算参与者 pnl、胜率、最大回撤、夏普比，持久化并 WebSocket 广播
+- **A 股账户模型**：T+1 仓位、挂单冻结现金/仓位、买入费用、日终结算
+- **实时 API**：REST API + WebSocket 实时推送行情、成交、盘口快照、排行榜
+- **前端委托终端**：可视化委托提交、实时订单簿、我的订单、成交记录、账户栏
+- **监控面板**：引擎统计、参与者配置、账户初始设置、实时价格走势、逐笔成交流水、排行榜、实时日志
+- **持久化层**：SQLite 异步持久化订单、成交、账户快照、排行榜记录
 - **完整测试体系**：109 项测试覆盖单元测试、集成测试、端到端测试、性能基准
 
 ## 架构概览
 
+```mermaid
+flowchart TB
+    subgraph Client["外部客户端 / 策略系统"]
+        REST["REST API"]
+        WS["WebSocket"]
+        Web["前端页面"]
+    end
+
+    subgraph API["API Gateway (FastAPI)"]
+        OrderAPI["委托接收与校验"]
+        QueryAPI["订单/账户查询"]
+        ConfigAPI["行情与参与者配置"]
+        Push["实时推送"]
+    end
+
+    subgraph Core["撮合核心引擎"]
+        OB["订单簿 OrderBook"]
+        AC["账户模型 Account"]
+        ME["撮合引擎 SymbolMatchingEngine"]
+        LI["延迟注入器 LatencyInjector"]
+    end
+
+    subgraph MarketData["Level-2 行情接入层"]
+        Feed["MockLevel2Feed"]
+        Registry["ParticipantRegistry"]
+        State["SharedMarketState"]
+        Regime["Market Regime"]
+    end
+
+    subgraph Persistence["持久化层"]
+        DB[(SQLite)]
+    end
+
+    Client -->|委托下单/撤单/查询/订阅| API
+    API -->|路由订单| Core
+    Core -->|成交/行情| Push
+    Push --> Client
+    Feed -->|生成模拟委托| API
+    Feed -->|更新订单簿不平衡| State
+    Regime -->|注入冲击订单| Feed
+    Registry -->|管理参与者| Feed
+    Core -->|持久化订单/成交/账户| DB
+    Feed -->|持久化排行榜| DB
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    外部客户端 / 策略系统                      │
-│              (REST API / WebSocket / 前端页面)               │
-└──────────────────┬──────────────────────────────────────────┘
-                   │ 委托下单 / 撤单 / 查询 / 行情订阅
-┌──────────────────▼──────────────────────────────────────────┐
-│                    API Gateway (FastAPI)                      │
-│  • 委托接收与校验  • 订单查询  • 行情配置  • 实时推送          │
-└──────────────────┬──────────────────────────────────────────┘
-                   │
-┌──────────────────▼──────────────────────────────────────────┐
-│                    撮合核心引擎 (Matching Engine)              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐    │
-│  │  订单簿       │  │  账户模型    │  │  撮合执行器       │    │
-│  │  OrderBook   │  │   Account    │  │ MatchingEngine │    │
-│  └──────────────┘  └──────────────┘  └──────────────────┘    │
-└──────────────────┬──────────────────────────────────────────┘
-                   │
-┌──────────────────▼──────────────────────────────────────────┐
-│                    Level-2 行情接入层                          │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐    │
-│  │  模拟行情源  │  │  参与者注册表│  │  文件回放/WebSocket│   │
-│  │ MockLevel2Feed│  │ParticipantRegistry│  │   (预留)         │   │
-│  └──────────────┘  └──────────────┘  └──────────────────┘    │
-└─────────────────────────────────────────────────────────────┘
+
+## 核心数据流
+
+```mermaid
+flowchart LR
+    subgraph Sources["行情与委托来源"]
+        User["用户/策略委托"]
+        Mock["Mock 参与者委托"]
+        Trade["逐笔成交 Feed"]
+        Cancel["行情撤单 Feed"]
+    end
+
+    subgraph Engine["撮合引擎"]
+        Validate["参数与市场规则校验"]
+        AccountCheck["账户风控校验"]
+        Match["价格交叉撮合 / 入队"]
+        QueueConsume["队列消耗"]
+        AccountUpdate["账户更新"]
+    end
+
+    subgraph State["共享状态"]
+        Shared["SharedMarketState"]
+        Leaderboard["排行榜 Leaderboard"]
+    end
+
+    subgraph Output["输出"]
+        WSOut["WebSocket 推送"]
+        DB[(SQLite 持久化)]
+    end
+
+    User -->|POST /api/v1/orders| Validate
+    Mock -->|is_mock=True, source=external| Validate
+    Validate -->|通过| AccountCheck
+    AccountCheck -->|通过| Match
+    Match -->|产生成交| AccountUpdate
+    Trade --> QueueConsume
+    Cancel -->|精确 order_id 撤单 / 匿名消耗| QueueConsume
+    AccountUpdate --> Shared
+    QueueConsume --> Shared
+    Shared --> Leaderboard
+    AccountUpdate --> WSOut
+    AccountUpdate --> DB
+    Leaderboard -->|每 10 秒| WSOut
+    Leaderboard --> DB
 ```
+
+## 订单状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING : 创建订单
+    PENDING --> ACTIVE : 校验通过
+    PENDING --> REJECTED : 校验失败
+
+    ACTIVE --> QUEUED : 价格不交叉，进入队列
+    ACTIVE --> PARTIAL : 部分成交
+    ACTIVE --> FILLED : 全部成交
+
+    QUEUED --> PARTIAL : 行情触发部分成交
+    QUEUED --> FILLED : 行情触发全部成交
+    QUEUED --> CANCELLED : 主动撤单 / 行情撤单
+
+    PARTIAL --> FILLED : 剩余部分成交
+    PARTIAL --> CANCELLED : 撤销剩余部分
+
+    REJECTED --> [*]
+    FILLED --> [*]
+    CANCELLED --> [*]
+```
+
+## 行情参与者
+
+模拟行情由多类智能参与者生成，每类参与者有独立策略与虚拟账户：
+
+| 类型 | 标识 | 策略 |
+|------|------|------|
+| 做市商 | MM | 双向挂盘 + inventory 管理，买低卖高获利 |
+| 趋势跟踪者 | TF | 跟随价格趋势顺势交易 |
+| 均值回归者 | MR | 价格偏离均线时反向交易 |
+| 噪声交易者 | NT | 随机方向、随机价格、较高撤单概率 |
+| 激进交易者 | AT | 大单主动吃盘，冲击市场 |
+| 算法交易者 | ALGO | TWAP/VWAP 拆单执行 |
+| 止损止盈者 | SL | 持仓达到止损/止盈价位后平仓 |
+| 订单簿不平衡者 | OBI | 根据买卖盘深度不平衡交易 |
+| 冰山订单者 | ICE | 大单拆分为可见/隐藏部分分批挂出 |
+| 主观方向交易者 | DIR | 围绕目标价格主动推动方向 |
+| 筹码收集者 | CHIP | 分阶段低价建仓，控制成本 |
+| 日内做 T 者 | DAY | 利用 bid-ask spread 快速进出 |
+
+所有参与者都会根据自身策略**主动撤单**：优先撤销价格偏离当前市价较大、挂单时间较长的订单，并通过 `order_id` 精确从订单簿中移除，保证 `_pending_orders` 与真实队列一致。
+
+参与者配置会持久化到全局缓存，即使所有 WebSocket 客户端断开、行情源重建后仍然保留；重建时会继承原有虚拟账户状态（现金、持仓、交易历史、P&L 曲线）。
 
 ## 快速开始
 
@@ -116,8 +229,23 @@ python -m uvicorn src.api.server:app --host 0.0.0.0 --port 8000
 | GET | `/api/v1/market/participants` | 参与者状态 |
 | GET | `/api/v1/market/participants/config` | 获取当前配置 |
 | POST | `/api/v1/market/participants/config` | 更新参与者配置 |
+| GET | `/api/v1/market/regime/{symbol}` | 获取市场微观结构模式 |
+| POST | `/api/v1/market/regime/{symbol}` | 切换市场微观结构模式 |
 
-配置项包括：目标价格、订单间隔、做市商数量、趋势跟踪者数量、均值回归者数量、噪声交易者数量、激进交易者数量。
+配置项包括：目标价格、订单间隔、各类参与者数量、市场 regime。
+
+### 延迟注入接口
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/latency` | 获取当前延迟配置 |
+| POST | `/api/v1/latency` | 更新延迟配置 |
+
+### 排行榜接口
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/leaderboard/{symbol}` | 获取某标的参与者排行榜 |
 
 ### WebSocket 订阅
 
@@ -151,16 +279,18 @@ ws.onmessage = (event) => {
 - 全局统计卡片：委托接收数、成交笔数、排队订单、活跃引擎数等
 - **账户初始设置**：设置初始现金与初始可用持仓，一键重置账户
 - **行情参与者配置**：动态调整目标价格、订单间隔、各类参与者数量
+- **市场微观结构模式**：切换 `normal` / `flash_crash` / `pump`
 - 实时价格走势图
 - 逐笔成交流水
 - 实时订单簿
 - 活跃标的列表
 - 参与者状态表
+- **龙虎榜**：pnl、胜率、最大回撤、夏普比
 - 实时日志
 
 ## 账户系统
 
-系统采用 A股风格的账户模型：
+系统采用 A 股风格的账户模型：
 
 - **cash**: 可用现金
 - **frozen_cash**: 买入挂单已冻结资金
@@ -171,20 +301,6 @@ ws.onmessage = (event) => {
 - **trade_count**: 成交笔数
 
 买入委托会按委托价格 + 预估费用冻结现金；卖出委托会冻结可用仓位。成交后根据实际成交价格和费用结算，解冻多余资金/仓位。
-
-## 行情参与者
-
-模拟行情由多类参与者生成，每类参与者有独立策略：
-
-| 类型 | 标识 | 策略 |
-|------|------|------|
-| 做市商 | MM | 双向挂盘，维持盘口深度 |
-| 趋势跟踪者 | TF | 跟随价格趋势顺势交易 |
-| 均值回归者 | MR | 价格偏离均线时反向交易 |
-| 噪声交易者 | NT | 随机方向、随机价格、高撤单概率 |
-| 激进交易者 | AT | 大单主动吃盘，冲击市场 |
-
-参与者配置会持久化到全局缓存，即使所有 WebSocket 客户端断开、行情源重建后仍然保留。
 
 ## 撮合逻辑
 
@@ -208,42 +324,64 @@ ws.onmessage = (event) => {
 - **买方主动成交**：消耗卖方队列中价格 <= 成交价的订单
 - **卖方主动成交**：消耗买方队列中价格 >= 成交价的订单
 
+## 市场微观结构模式
+
+| 模式 | 行为 |
+|------|------|
+| `normal` | 正常模拟行情 |
+| `flash_crash` | 30% 概率每 tick 注入大额市价卖单，冲击买方队列 |
+| `pump` | 30% 概率每 tick 注入大额市价买单，冲击卖方队列 |
+
+## 排行榜与结算
+
+每 10 秒计算一次所有参与者的排行榜：
+
+- **pnl**: 基于初始资产与当前市值的盈亏
+- **win_rate**: 成交中盈利笔数占比（启发式）
+- **max_drawdown**: 历史 P&L 曲线最大回撤
+- **sharpe_ratio**: 简化夏普比率
+
+计算结果持久化到 SQLite，并通过 WebSocket 推送给订阅了该标的的所有客户端。
+
 ## 项目结构
 
 ```
 ├── docs/
-│   ├── architecture.md      # 系统架构设计
-│   ├── api_spec.md          # API 接口规范
-│   ├── matching_logic.md    # 撮合逻辑详细说明
-│   └── optimization_report.md # 性能优化报告
+│   ├── architecture.md         # 系统架构设计
+│   ├── api_spec.md             # API 接口规范
+│   ├── matching_logic.md       # 撮合逻辑详细说明
+│   └── optimization_report.md  # 性能优化报告
 ├── frontend/
-│   ├── index.html           # 委托终端
-│   ├── monitor.html         # 监控面板
+│   ├── index.html              # 委托终端
+│   ├── monitor.html            # 监控面板
 │   ├── css/
 │   └── js/
-│       ├── app.js           # 委托终端逻辑
-│       └── monitor.js       # 监控面板逻辑
+│       ├── app.js              # 委托终端逻辑
+│       └── monitor.js          # 监控面板逻辑
 ├── src/
 │   ├── core/
-│   │   ├── order.py         # 订单与成交模型
-│   │   ├── order_book.py    # 订单簿
-│   │   ├── matching_engine.py # 撮合引擎
-│   │   ├── account.py       # 账户模型
-│   │   └── fee.py           # 费用计算
+│   │   ├── order.py            # 订单与成交模型
+│   │   ├── order_book.py       # 订单簿
+│   │   ├── matching_engine.py  # 撮合引擎
+│   │   ├── account.py          # 账户模型
+│   │   ├── fee.py              # 费用计算
+│   │   ├── market_rules.py     # A 股市场规则
+│   │   ├── latency_injector.py # 延迟注入器
+│   │   └── leaderboard.py      # 排行榜计算
 │   ├── data/
-│   │   ├── market_data.py   # 行情数据模型
-│   │   ├── level2_feed.py   # Level-2 行情接入
-│   │   └── participants.py  # 行情参与者
+│   │   ├── market_data.py      # 行情数据模型
+│   │   ├── level2_feed.py      # Level-2 行情接入
+│   │   └── participants.py     # 行情参与者
 │   ├── api/
-│   │   └── server.py        # FastAPI 服务
+│   │   └── server.py           # FastAPI 服务
 │   ├── persistence/
-│   │   └── persistence.py   # SQLite 持久化
+│   │   └── persistence.py      # SQLite 持久化
 │   └── utils/
-│       └── config.py        # 配置管理
-├── tests/                    # 测试用例（109 项）
-├── main.py                   # 启动入口
-├── requirements.txt          # 依赖
-└── README.md                 # 本文件
+│       └── config.py           # 配置管理
+├── tests/                      # 测试用例（109 项）
+├── main.py                     # 启动入口
+├── requirements.txt            # 依赖
+└── README.md                   # 本文件
 ```
 
 ## 文档
@@ -294,10 +432,14 @@ python -m pytest tests/ -q
 - [x] 端到端测试体系（109 项测试）
 - [x] 前端可视化委托界面
 - [x] 后端撮合监控面板
-- [x] 多类市场参与者模拟
-- [x] A股账户模型（T+1、冻结、费用）
+- [x] 多类市场参与者模拟（12 类）
+- [x] A 股账户模型（T+1、冻结、费用）
 - [x] SQLite 持久化支持
 - [x] 参与者配置持久化
+- [x] 外部撤单隔离（source 标记）
+- [x] 延迟注入器
+- [x] 市场微观结构 regime 切换
+- [x] 全局排行榜与结算系统
 - [ ] 真实 Level-2 行情源接入（券商/行情商接口）
 - [ ] 文件回放回测模式
 - [ ] 多节点集群部署
