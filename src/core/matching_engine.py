@@ -73,6 +73,7 @@ class SymbolMatchingEngine:
             "trades_generated": 0,
             "trades_from_feed": 0,
             "trades_from_cross": 0,
+            "cancels_processed": 0,
         }
 
         # 最新成交价（用于价格笼子基准价回退）
@@ -321,6 +322,16 @@ class SymbolMatchingEngine:
 
     async def _handle_cancel_feed(self, cancel_data: dict):
         """处理行情撤单事件（驱动队列消耗）"""
+        # 如果提供了 order_id，优先按订单 ID 精确撤单（参与者主动撤自己的单）
+        order_id = cancel_data.get("order_id")
+        if order_id:
+            order = self.order_book.get_order(order_id)
+            if order and order.source == "external" and order.is_in_queue:
+                cancelled = self.order_book.cancel_order(order_id)
+                if cancelled:
+                    self._stats["cancels_processed"] += 1
+                    return
+
         price = Decimal(str(cancel_data["price"]))
         cancel_qty = int(cancel_data["quantity"])
         side = cancel_data.get("side", "unknown")
@@ -330,7 +341,7 @@ class SymbolMatchingEngine:
 
         actual = self.order_book.consume_queue_on_cancel(price, cancel_qty, side)
         if actual > 0:
-            self._stats["trades_generated"] += 1
+            self._stats["cancels_processed"] += 1
     
     async def _handle_trade(self, trade: dict):
         """处理逐笔成交（驱动队列消耗）"""

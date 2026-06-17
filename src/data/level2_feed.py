@@ -196,6 +196,11 @@ class MockLevel2Feed(Level2FeedHandler):
 
             snapshot = self._get_book_snapshot()
 
+            # 更新共享市场状态的订单簿不平衡指标
+            if snapshot:
+                from ..data.participants import get_shared_market_state
+                get_shared_market_state(self.symbol).on_book_update(snapshot)
+
             # 根据市场微观结构模式注入额外冲击订单
             shock_order = self._generate_shock_order(snapshot)
             if shock_order:

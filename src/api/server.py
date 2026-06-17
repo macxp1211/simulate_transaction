@@ -158,11 +158,25 @@ async def startup_event():
             await _run_persistence(persistence.save_trade, trade.to_dict())
             # 同时持久化该笔成交对应订单的最新状态
             engine = engine_manager.get_all_engines().get(trade.symbol)
+            
+            # 通知主动方参与者
             order = engine.get_order(trade.order_id) if engine else None
             if order:
                 await _run_persistence(persistence.save_order, order.to_dict())
                 # 通知对应参与者订单已成交，清理其 pending 列表
                 _notify_participant_filled(trade.order_id, trade.to_dict())
+            
+            # 通知对手方参与者（被动成交方）
+            if trade.counterparty_order_id:
+                counter_order = engine.get_order(trade.counterparty_order_id) if engine else None
+                if counter_order:
+                    await _run_persistence(persistence.save_order, counter_order.to_dict())
+                    # 从对手方视角构造成交信息：side 取反
+                    counter_trade_info = trade.to_dict()
+                    counter_trade_info["side"] = "sell" if trade.side == "buy" else "buy"
+                    counter_trade_info["order_id"] = trade.counterparty_order_id
+                    counter_trade_info["counterparty_order_id"] = trade.order_id
+                    _notify_participant_filled(trade.counterparty_order_id, counter_trade_info)
         except Exception as e:
             print(f"[Persistence] save trade/order error: {e}")
 

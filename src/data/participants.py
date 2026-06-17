@@ -25,6 +25,7 @@ class SharedMarketState:
         self.order_flow_imbalance: float = 0.0
         self.trade_volume_buys: int = 0
         self.trade_volume_sells: int = 0
+        self.regime: str = "normal"
         self._max_history = 200
 
     def on_trade(self, trade: Dict):
@@ -41,7 +42,7 @@ class SharedMarketState:
         side = trade.get("side", "")
         if side == "buy":
             self.trade_volume_buys += qty
-        else:
+        elif side == "sell":
             self.trade_volume_sells += qty
         total_vol = self.trade_volume_buys + self.trade_volume_sells
         if total_vol > 1_000_000:
@@ -167,6 +168,55 @@ class MarketParticipant(ABC):
             order["hidden_quantity"] = quantity - visible_qty
         return order
 
+    def _build_cancel_dict(self, order: Dict, quantity: Optional[int] = None) -> Dict:
+        """构造包含 order_id 的精确撤单请求"""
+        return {
+            "symbol": self.symbol,
+            "side": order["side"],
+            "price": order["price"],
+            "quantity": quantity if quantity is not None else order["quantity"],
+            "order_id": order["order_id"],
+            "timestamp": datetime.now().isoformat(),
+            "participant_id": self.participant_id,
+        }
+
+    def _select_cancel_candidate(self, book_snapshot: Optional[Dict]) -> Optional[Dict]:
+        """智能选择最需要撤掉的挂单
+
+        优先撤掉：
+        1. 价格明显偏离当前市场价的订单（避免无效挂单堆积）
+        2. 挂了很久的订单
+        """
+        if not self._pending_orders:
+            return None
+
+        mid = self._get_mid_price(book_snapshot) or self._current_price
+        candidates = []
+        for o in self._pending_orders:
+            try:
+                order_price = Decimal(str(o["price"]))
+            except Exception:
+                continue
+            # 价格偏离度
+            if mid and mid > 0:
+                deviation = abs(order_price - mid) / mid
+            else:
+                deviation = Decimal("0")
+            # 订单年龄（秒）
+            try:
+                ts = datetime.fromisoformat(o.get("timestamp", ""))
+                age = (datetime.now() - ts).total_seconds()
+            except Exception:
+                age = 0.0
+            # 综合分数：偏离越大、挂越久越优先撤
+            score = float(deviation) * 10 + age / 60.0
+            candidates.append((score, o))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates[0][1]
+
     def on_order_filled(self, order_id: str, trade_info: Dict):
         self._trade_history.append(trade_info)
         filled_qty = sum(
@@ -177,7 +227,6 @@ class MarketParticipant(ABC):
         if filled_qty >= total_qty:
             self._pending_orders = [o for o in self._pending_orders if o["order_id"] != order_id]
         self._update_pnl(trade_info)
-        get_shared_market_state(self.symbol).on_trade(trade_info)
         self._pnl_history.append(self.pnl)
         if len(self._pnl_history) > self._max_trade_history:
             self._pnl_history = self._pnl_history[-self._max_trade_history // 2:]
@@ -188,6 +237,31 @@ class MarketParticipant(ABC):
         self._pending_orders.append(order_dict)
         if len(self._pending_orders) > self._max_pending_orders:
             self._pending_orders = self._pending_orders[-self._max_pending_orders // 2:]
+
+    def _copy_state_from(self, other):
+        """重建参与者时保留虚拟账户与交易历史状态"""
+        if other is None or not isinstance(other, MarketParticipant):
+            return
+        self.cash = other.cash
+        self.position = other.position
+        self.frozen_cash = other.frozen_cash
+        self.frozen_position = other.frozen_position
+        self.total_fees = other.total_fees
+        self.total_trades = other.total_trades
+        self.initial_cash = other.initial_cash
+        self.initial_position = other.initial_position
+        self.initial_price = other.initial_price
+        self._trade_history = list(other._trade_history)
+        self._pnl_history = list(other._pnl_history)
+        self._order_seq = max(self._order_seq, other._order_seq)
+        # pending_orders 在重建后可能和实际队列不一致，选择清空由新订单重建
+        self._pending_orders = []
+        # 子类特有状态
+        self._copy_subclass_state_from(other)
+
+    def _copy_subclass_state_from(self, other):
+        """子类可重写以保留自身状态"""
+        pass
 
     def _update_pnl(self, trade_info: Dict):
         price = Decimal(str(trade_info.get("price", 0)))
@@ -404,16 +478,9 @@ class MarketMaker(MarketParticipant):
         # 做市商极少撤单，只在订单过多时撤
         if random.random() > 0.02 or not self._pending_orders:
             return None
-        order = random.choice(self._pending_orders)
+        order = self._select_cancel_candidate(book_snapshot)
         self._pending_orders = [o for o in self._pending_orders if o["order_id"] != order["order_id"]]
-        return {
-            "symbol": self.symbol,
-            "side": order["side"],
-            "price": order["price"],
-            "quantity": random.randint(1, 5) * 100,
-            "timestamp": datetime.now().isoformat(),
-            "participant_id": self.participant_id,
-        }
+        return self._build_cancel_dict(order, random.randint(1, 5) * 100)
 
 
 # ─────────── 2. 趋势跟踪者 ───────────
@@ -426,6 +493,11 @@ class TrendFollower(MarketParticipant):
         self.window_size = window_size
         self.momentum_threshold = Decimal(str(momentum_threshold))
         self._price_history: List[Decimal] = []
+
+    def _copy_subclass_state_from(self, other):
+        if not isinstance(other, TrendFollower):
+            return
+        self._price_history = list(other._price_history)
 
     def _update_price_history(self, book_snapshot: Optional[Dict]):
         if not book_snapshot:
@@ -466,16 +538,9 @@ class TrendFollower(MarketParticipant):
     def generate_cancel(self, book_snapshot: Optional[Dict]) -> Optional[Dict]:
         if random.random() > 0.02 or not self._pending_orders:
             return None
-        order = random.choice(self._pending_orders)
+        order = self._select_cancel_candidate(book_snapshot)
         self._pending_orders = [o for o in self._pending_orders if o["order_id"] != order["order_id"]]
-        return {
-            "symbol": self.symbol,
-            "side": order["side"],
-            "price": order["price"],
-            "quantity": random.randint(1, 3) * 100,
-            "timestamp": datetime.now().isoformat(),
-            "participant_id": self.participant_id,
-        }
+        return self._build_cancel_dict(order, random.randint(1, 3) * 100)
 
 
 # ─────────── 3. 均值回归者 ───────────
@@ -488,6 +553,11 @@ class MeanReversionTrader(MarketParticipant):
         self.ma_window = ma_window
         self.deviation_threshold = Decimal(str(deviation_threshold))
         self._price_history: List[Decimal] = []
+
+    def _copy_subclass_state_from(self, other):
+        if not isinstance(other, MeanReversionTrader):
+            return
+        self._price_history = list(other._price_history)
 
     def _update_price_history(self, book_snapshot: Optional[Dict]):
         if not book_snapshot:
@@ -529,16 +599,9 @@ class MeanReversionTrader(MarketParticipant):
     def generate_cancel(self, book_snapshot: Optional[Dict]) -> Optional[Dict]:
         if random.random() > 0.05 or not self._pending_orders:
             return None
-        order = random.choice(self._pending_orders)
+        order = self._select_cancel_candidate(book_snapshot)
         self._pending_orders = [o for o in self._pending_orders if o["order_id"] != order["order_id"]]
-        return {
-            "symbol": self.symbol,
-            "side": order["side"],
-            "price": order["price"],
-            "quantity": random.randint(1, 3) * 100,
-            "timestamp": datetime.now().isoformat(),
-            "participant_id": self.participant_id,
-        }
+        return self._build_cancel_dict(order, random.randint(1, 3) * 100)
 
 
 # ─────────── 4. 噪声交易者 ───────────
@@ -590,16 +653,9 @@ class NoiseTrader(MarketParticipant):
     def generate_cancel(self, book_snapshot: Optional[Dict]) -> Optional[Dict]:
         if random.random() > self.cancel_prob or not self._pending_orders:
             return None
-        order = random.choice(self._pending_orders)
+        order = self._select_cancel_candidate(book_snapshot)
         self._pending_orders = [o for o in self._pending_orders if o["order_id"] != order["order_id"]]
-        return {
-            "symbol": self.symbol,
-            "side": order["side"],
-            "price": order["price"],
-            "quantity": random.randint(1, 3) * 100,
-            "timestamp": datetime.now().isoformat(),
-            "participant_id": self.participant_id,
-        }
+        return self._build_cancel_dict(order, random.randint(1, 3) * 100)
 
 
 # ─────────── 5. 激进交易者 ───────────
@@ -712,6 +768,17 @@ class AlgorithmicTrader(MarketParticipant):
         self._tick_count = 0
         self._target_order = {"side": side, "total_quantity": self._total_qty, "price": mid}
 
+    def _copy_subclass_state_from(self, other):
+        if not isinstance(other, AlgorithmicTrader):
+            return
+        self._target_order = dict(other._target_order) if other._target_order else None
+        self._slices_remaining = other._slices_remaining
+        self._slice_size = other._slice_size
+        self._slice_side = other._slice_side
+        self._slice_price = other._slice_price
+        self._tick_count = other._tick_count
+        self._total_qty = other._total_qty
+
     def generate_cancel(self, book_snapshot: Optional[Dict]) -> Optional[Dict]:
         return None
 
@@ -773,13 +840,24 @@ class StopLossTrader(MarketParticipant):
 
     def on_order_filled(self, order_id: str, trade_info: Dict):
         super().on_order_filled(order_id, trade_info)
-        if order_id == self._closing_order_id:
+        # 只有平仓单完全成交、持仓清零后才重置状态，避免部分成交导致状态错乱
+        if order_id == self._closing_order_id and self.position == 0:
             self._position_side = None
             self._position_qty = 0
             self._entry_price = None
             self._stop_price = None
             self._profit_price = None
             self._closing_order_id = None
+
+    def _copy_subclass_state_from(self, other):
+        if not isinstance(other, StopLossTrader):
+            return
+        self._entry_price = other._entry_price
+        self._stop_price = other._stop_price
+        self._profit_price = other._profit_price
+        self._position_side = other._position_side
+        self._position_qty = other._position_qty
+        self._closing_order_id = other._closing_order_id
 
     def generate_cancel(self, book_snapshot: Optional[Dict]) -> Optional[Dict]:
         return None
@@ -823,16 +901,9 @@ class OrderBookImbalanceTrader(MarketParticipant):
     def generate_cancel(self, book_snapshot: Optional[Dict]) -> Optional[Dict]:
         if random.random() > 0.03 or not self._pending_orders:
             return None
-        order = random.choice(self._pending_orders)
+        order = self._select_cancel_candidate(book_snapshot)
         self._pending_orders = [o for o in self._pending_orders if o["order_id"] != order["order_id"]]
-        return {
-            "symbol": self.symbol,
-            "side": order["side"],
-            "price": order["price"],
-            "quantity": random.randint(1, 3) * 100,
-            "timestamp": datetime.now().isoformat(),
-            "participant_id": self.participant_id,
-        }
+        return self._build_cancel_dict(order, random.randint(1, 3) * 100)
 
 
 # ─────────── 9. 冰山订单参与者 ───────────
@@ -866,17 +937,10 @@ class IcebergParticipant(MarketParticipant):
     def generate_cancel(self, book_snapshot: Optional[Dict]) -> Optional[Dict]:
         if random.random() > 0.02 or not self._pending_orders:
             return None
-        order = random.choice(self._pending_orders)
+        order = self._select_cancel_candidate(book_snapshot)
         self._pending_orders = [o for o in self._pending_orders if o["order_id"] != order["order_id"]]
         self._iceberg_orders.pop(order["order_id"], None)
-        return {
-            "symbol": self.symbol,
-            "side": order["side"],
-            "price": order["price"],
-            "quantity": random.randint(1, 3) * 100,
-            "timestamp": datetime.now().isoformat(),
-            "participant_id": self.participant_id,
-        }
+        return self._build_cancel_dict(order, random.randint(1, 3) * 100)
 
     def on_order_filled(self, order_id: str, trade_info: Dict):
         super().on_order_filled(order_id, trade_info)
@@ -886,6 +950,11 @@ class IcebergParticipant(MarketParticipant):
         info["filled_qty"] += trade_info.get("quantity", 0)
         if info["filled_qty"] >= info["total_qty"]:
             self._iceberg_orders.pop(order_id, None)
+
+    def _copy_subclass_state_from(self, other):
+        if not isinstance(other, IcebergParticipant):
+            return
+        self._iceberg_orders = dict(other._iceberg_orders)
 
 
 # ─────────── 10. 主观方向交易者（新增） ───────────
@@ -981,16 +1050,9 @@ class DirectionalTrader(MarketParticipant):
     def generate_cancel(self, book_snapshot: Optional[Dict]) -> Optional[Dict]:
         if random.random() > 0.05 or not self._pending_orders:
             return None
-        order = random.choice(self._pending_orders)
+        order = self._select_cancel_candidate(book_snapshot)
         self._pending_orders = [o for o in self._pending_orders if o["order_id"] != order["order_id"]]
-        return {
-            "symbol": self.symbol,
-            "side": order["side"],
-            "price": order["price"],
-            "quantity": random.randint(1, 3) * 100,
-            "timestamp": datetime.now().isoformat(),
-            "participant_id": self.participant_id,
-        }
+        return self._build_cancel_dict(order, random.randint(1, 3) * 100)
 
 
 # ─────────── 11. 筹码收集者（新增） ───────────
@@ -1039,6 +1101,12 @@ class ChipCollector(MarketParticipant):
         if self.target_position <= 0:
             return 1.0
         return min(1.0, max(0.0, self.position / self.target_position))
+
+    def _copy_subclass_state_from(self, other):
+        if not isinstance(other, ChipCollector):
+            return
+        self._collection_start_price = other._collection_start_price
+        self._price_history = list(other._price_history)
 
     def generate_order(self, book_snapshot: Optional[Dict]) -> Optional[Dict]:
         self._update_history(book_snapshot)
@@ -1118,16 +1186,9 @@ class ChipCollector(MarketParticipant):
     def generate_cancel(self, book_snapshot: Optional[Dict]) -> Optional[Dict]:
         if random.random() > 0.03 or not self._pending_orders:
             return None
-        order = random.choice(self._pending_orders)
+        order = self._select_cancel_candidate(book_snapshot)
         self._pending_orders = [o for o in self._pending_orders if o["order_id"] != order["order_id"]]
-        return {
-            "symbol": self.symbol,
-            "side": order["side"],
-            "price": order["price"],
-            "quantity": random.randint(1, 3) * 100,
-            "timestamp": datetime.now().isoformat(),
-            "participant_id": self.participant_id,
-        }
+        return self._build_cancel_dict(order, random.randint(1, 3) * 100)
 
 
 # ─────────── 12. 日内高抛低吸交易者（新增） ───────────
@@ -1150,6 +1211,12 @@ class DayTrader(MarketParticipant):
         self.profit_target_pct = Decimal(str(profit_target_pct))
         self._holdings: List[Dict] = []  # 每笔持仓：{entry_price, qty, side, ticks_held, order_id}
         self._cooldown = 0
+
+    def _copy_subclass_state_from(self, other):
+        if not isinstance(other, DayTrader):
+            return
+        self._holdings = [dict(h) for h in other._holdings]
+        self._cooldown = other._cooldown
 
     def generate_order(self, book_snapshot: Optional[Dict]) -> Optional[Dict]:
         if not book_snapshot:
@@ -1241,26 +1308,23 @@ class DayTrader(MarketParticipant):
 
     def on_order_filled(self, order_id: str, trade_info: Dict):
         super().on_order_filled(order_id, trade_info)
-        # 更新持仓的 order_id（首次成交时记录）
+        # 根据实际累计成交量更新持仓数量，避免部分成交后平仓数量错误
+        filled_qty = sum(
+            t.get("quantity", 0) for t in self._trade_history if t.get("order_id") == order_id
+        )
         for h in self._holdings:
             if h.get("order_id") == order_id:
+                h["qty"] = filled_qty
                 h["entry_price"] = Decimal(str(trade_info.get("price", h["entry_price"])))
 
     def generate_cancel(self, book_snapshot: Optional[Dict]) -> Optional[Dict]:
         if random.random() > 0.05 or not self._pending_orders:
             return None
-        order = random.choice(self._pending_orders)
+        order = self._select_cancel_candidate(book_snapshot)
         self._pending_orders = [o for o in self._pending_orders if o["order_id"] != order["order_id"]]
         # 同时从 holdings 中移除
         self._holdings = [h for h in self._holdings if h.get("order_id") != order["order_id"]]
-        return {
-            "symbol": self.symbol,
-            "side": order["side"],
-            "price": order["price"],
-            "quantity": random.randint(1, 3) * 100,
-            "timestamp": datetime.now().isoformat(),
-            "participant_id": self.participant_id,
-        }
+        return self._build_cancel_dict(order, random.randint(1, 3) * 100)
 
 
 # ─────────── 注册表 ───────────
@@ -1310,6 +1374,7 @@ class ParticipantRegistry:
                 inventory_skew=_get_old_attr(pid, "inventory_skew", Decimal("0.5")),
                 max_inventory=_get_old_attr(pid, "max_inventory", 5000),
             )
+            p._copy_state_from(old.get(pid))
             self._participants[pid] = p
 
         # 趋势跟踪者
@@ -1321,6 +1386,7 @@ class ParticipantRegistry:
                 window_size=_get_old_attr(pid, "window_size", 10),
                 momentum_threshold=_get_old_attr(pid, "momentum_threshold", Decimal("0.02")),
             )
+            p._copy_state_from(old.get(pid))
             self._participants[pid] = p
 
         # 均值回归者
@@ -1332,6 +1398,7 @@ class ParticipantRegistry:
                 ma_window=_get_old_attr(pid, "ma_window", 20),
                 deviation_threshold=_get_old_attr(pid, "deviation_threshold", Decimal("0.03")),
             )
+            p._copy_state_from(old.get(pid))
             self._participants[pid] = p
 
         # 噪声交易者
@@ -1343,6 +1410,7 @@ class ParticipantRegistry:
                 irrational_prob=_get_old_attr(pid, "irrational_prob", 0.05),
                 cancel_prob=_get_old_attr(pid, "cancel_prob", 0.15),
             )
+            p._copy_state_from(old.get(pid))
             self._participants[pid] = p
 
         # 激进交易者
@@ -1354,6 +1422,7 @@ class ParticipantRegistry:
                 burst_prob=_get_old_attr(pid, "burst_prob", 0.15),
                 min_depth=_get_old_attr(pid, "min_depth", 2000),
             )
+            p._copy_state_from(old.get(pid))
             self._participants[pid] = p
 
         # 算法交易者
@@ -1365,6 +1434,7 @@ class ParticipantRegistry:
                 algo_type="twap" if i % 2 == 0 else "vwap",
                 slice_count=_get_old_attr(pid, "slice_count", 10),
             )
+            p._copy_state_from(old.get(pid))
             self._participants[pid] = p
 
         # 止损交易者
@@ -1376,6 +1446,7 @@ class ParticipantRegistry:
                 stop_loss_pct=_get_old_attr(pid, "stop_loss_pct", 0.03),
                 take_profit_pct=_get_old_attr(pid, "take_profit_pct", 0.05),
             )
+            p._copy_state_from(old.get(pid))
             self._participants[pid] = p
 
         # 订单簿不平衡交易者
@@ -1386,6 +1457,7 @@ class ParticipantRegistry:
                 target_price=float(target), order_interval=base_interval * (1.0 + i * 0.2),
                 imbalance_threshold=_get_old_attr(pid, "imbalance_threshold", 0.3),
             )
+            p._copy_state_from(old.get(pid))
             self._participants[pid] = p
 
         # 冰山订单参与者
@@ -1396,6 +1468,7 @@ class ParticipantRegistry:
                 target_price=float(target), order_interval=base_interval * (1.5 + i * 0.3),
                 visible_ratio=_get_old_attr(pid, "visible_ratio", 0.1),
             )
+            p._copy_state_from(old.get(pid))
             self._participants[pid] = p
 
         # 主观方向交易者（新增）
@@ -1407,6 +1480,7 @@ class ParticipantRegistry:
                 urgency=_get_old_attr(pid, "urgency", Decimal("0.7")),
                 max_position=_get_old_attr(pid, "max_position", 30000),
             )
+            p._copy_state_from(old.get(pid))
             self._participants[pid] = p
 
         # 筹码收集者（新增）
@@ -1417,6 +1491,7 @@ class ParticipantRegistry:
                 target_price=float(target), order_interval=base_interval * (1.2 + i * 0.3),
                 target_position=_get_old_attr(pid, "target_position", 20000),
             )
+            p._copy_state_from(old.get(pid))
             self._participants[pid] = p
 
         # 日内交易者（新增）
@@ -1429,6 +1504,7 @@ class ParticipantRegistry:
                 stop_loss_pct=_get_old_attr(pid, "stop_loss_pct", 0.005),
                 profit_target_pct=_get_old_attr(pid, "profit_target_pct", 0.008),
             )
+            p._copy_state_from(old.get(pid))
             self._participants[pid] = p
 
     def update_config(self, config: Dict):
