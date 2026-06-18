@@ -48,11 +48,13 @@ class MarketRules:
         market_type: MarketType = MarketType.MAIN_BOARD,
         price_tick: Decimal = Decimal("0.01"),
         lot_size: int = 100,
+        price_cage_ratio: Decimal = Decimal("0.02"),
     ):
         self.previous_close = Decimal(str(previous_close))
         self.market_type = market_type
         self.price_tick = Decimal(str(price_tick))
         self.lot_size = lot_size
+        self.price_cage_ratio = Decimal(str(price_cage_ratio))
 
     # ─────────── 价格限制计算 ───────────
 
@@ -75,15 +77,13 @@ class MarketRules:
 
     @property
     def price_cage_upper(self) -> Decimal:
-        """价格笼子上限 = 昨收 × 102%（基准为最新成交价时使用）"""
-        # 注意：实际价格笼子基准是"对手盘最优价"或"最新成交价"，不是昨收
-        # 这里提供一个基于昨收的参考值，实际校验时需要传入基准价
-        return self.previous_close * Decimal("1.02")
+        """价格笼子上限 = 昨收 × (1 + 比例)"""
+        return self.previous_close * (Decimal("1") + self.price_cage_ratio)
 
     @property
     def price_cage_lower(self) -> Decimal:
-        """价格笼子下限 = 昨收 × 98%"""
-        return self.previous_close * Decimal("0.98")
+        """价格笼子下限 = 昨收 × (1 - 比例)"""
+        return self.previous_close * (Decimal("1") - self.price_cage_ratio)
 
     # ─────────── 校验方法 ───────────
 
@@ -124,17 +124,17 @@ class MarketRules:
         # 这里简化处理，默认连续竞价阶段
         if benchmark is not None:
             benchmark = Decimal(str(benchmark))
-            upper_cage = benchmark * Decimal("1.02")
-            lower_cage = benchmark * Decimal("0.98")
+            upper_cage = benchmark * (Decimal("1") + self.price_cage_ratio)
+            lower_cage = benchmark * (Decimal("1") - self.price_cage_ratio)
             if price > upper_cage:
                 return False, (
                     f"委托价格 {price} 超出价格笼子上限 {upper_cage} "
-                    f"(基准价 {benchmark}, 上限 +2%)"
+                    f"(基准价 {benchmark}, 上限 +{self.price_cage_ratio * 100}%)"
                 )
             if price < lower_cage:
                 return False, (
                     f"委托价格 {price} 低于价格笼子下限 {lower_cage} "
-                    f"(基准价 {benchmark}, 下限 -2%)"
+                    f"(基准价 {benchmark}, 下限 -{self.price_cage_ratio * 100}%)"
                 )
 
         return True, ""
@@ -200,8 +200,8 @@ class MarketRules:
             (下限, 上限)
         """
         benchmark = Decimal(str(benchmark))
-        lower = benchmark * Decimal("0.98")
-        upper = benchmark * Decimal("1.02")
+        lower = benchmark * (Decimal("1") - self.price_cage_ratio)
+        upper = benchmark * (Decimal("1") + self.price_cage_ratio)
         return (self._round_to_tick(lower), self._round_to_tick(upper))
 
     # ─────────── 序列化 ───────────
@@ -221,6 +221,7 @@ class MarketRules:
             "price_limit_ratio": str(self.price_limit_ratio),
             "upper_limit": str(self.upper_limit),
             "lower_limit": str(self.lower_limit),
+            "price_cage_ratio": str(self.price_cage_ratio),
             "price_cage_upper": str(cage_upper) if cage_upper is not None else str(self.price_cage_upper),
             "price_cage_lower": str(cage_lower) if cage_lower is not None else str(self.price_cage_lower),
             "price_tick": str(self.price_tick),
@@ -230,6 +231,10 @@ class MarketRules:
     def update_previous_close(self, new_close: Decimal):
         """更新昨收价（日终结算后调用）"""
         self.previous_close = Decimal(str(new_close))
+
+    def update_price_cage_ratio(self, ratio: Decimal):
+        """更新价格笼子比例（例如 0.02 表示 ±2%）"""
+        self.price_cage_ratio = Decimal(str(ratio))
 
 
 # 全局市场规则管理器：symbol -> MarketRules
@@ -252,6 +257,12 @@ def update_previous_close(symbol: str, new_close: Decimal):
     """更新某标的的昨收价"""
     rules = get_market_rules(symbol)
     rules.update_previous_close(new_close)
+
+
+def update_price_cage_ratio(symbol: str, ratio: Decimal):
+    """更新某标的的价格笼子比例"""
+    rules = get_market_rules(symbol)
+    rules.update_price_cage_ratio(ratio)
 
 
 def clear_market_rules():

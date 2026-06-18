@@ -128,6 +128,7 @@ class ParticipantConfigResponse(BaseModel):
 class MarketRulesUpdateRequest(BaseModel):
     previous_close: Optional[str] = Field(default=None, description="昨收价，如 10.50")
     market_type: Optional[str] = Field(default=None, description="市场类型: main_board/st_board/star_market/chinext/bse")
+    price_cage_ratio: Optional[str] = Field(default=None, description="价格笼子比例，如 0.02 表示 ±2%")
 
 class AccountResetRequest(BaseModel):
     initial_cash: Optional[str] = Field(default=None, description="初始现金，如 1000000.00")
@@ -1006,6 +1007,14 @@ async def update_market_rules_api(symbol: str, req: MarketRulesUpdateRequest):
                 rules.market_type = MarketType(req.market_type)
             except ValueError:
                 raise HTTPException(status_code=400, detail=f"未知市场类型: {req.market_type}")
+        if req.price_cage_ratio is not None and str(req.price_cage_ratio).strip() != "":
+            try:
+                ratio = Decimal(str(req.price_cage_ratio))
+                if ratio < 0:
+                    raise ValueError("价格笼子比例不能为负数")
+                rules.price_cage_ratio = ratio
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"价格笼子比例格式错误: {e}")
         return OrderResponse(
             code=0,
             message="success",
