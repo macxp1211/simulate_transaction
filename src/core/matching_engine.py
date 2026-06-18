@@ -395,12 +395,15 @@ class SymbolMatchingEngine:
         # 市场规则校验（涨跌停、价格笼子、最小变动、数量）
         rules = get_market_rules(self.symbol)
 
-        # 价格笼子基准价：买入看最优卖价，卖出看最优买价；
-        # 若对手盘不存在，则不启用价格笼子校验（仅校验涨跌停）
+        # 价格笼子基准价：
+        # - 买入优先看最优卖价（对手盘），若无卖盘则看最优买价（本方盘口），
+        #   最后 fallback 到最新成交价。避免卖盘为空时 last_trade_price 滞后
+        #   导致合理买价委托被拒绝。
+        # - 卖出对称处理。
         if order.side == Side.BUY:
-            benchmark = self.order_book.best_ask or self._last_trade_price
+            benchmark = self.order_book.best_ask or self.order_book.best_bid or self._last_trade_price
         else:
-            benchmark = self.order_book.best_bid or self._last_trade_price
+            benchmark = self.order_book.best_bid or self.order_book.best_ask or self._last_trade_price
 
         ok, msg = rules.validate_order(order.price, order.quantity, benchmark)
         if not ok:
