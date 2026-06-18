@@ -252,6 +252,7 @@ class MockLevel2Feed(Level2FeedHandler):
             "quantity": quantity,
             "order_id": f"shock-{side}-{uuid.uuid4().hex[:8]}",
             "participant_id": "SHOCK",
+            "order_type": "market",  # 冲击单作为市价单：未成交部分立即撤销，不污染订单簿
             "timestamp": datetime.now().isoformat(),
         }
 

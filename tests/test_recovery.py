@@ -141,6 +141,47 @@ class TestOrderBookRestore:
         assert sell.remaining_qty == 1000
 
 
+class TestMarketOrderDoesNotPolluteOrderBook:
+    def test_mock_market_order_remaining_cancelled(self, funded_account):
+        """mock 市价单未成交部分应立即撤销，不应以极端价格进入订单簿"""
+        from src.core.order import Order, Side, OrderType
+        from src.core.matching_engine import SymbolMatchingEngine
+
+        engine = SymbolMatchingEngine("000001.SZ", account=funded_account)
+
+        # 模拟一个买方冲击单（无对手盘）
+        shock_buy = Order(
+            symbol="000001.SZ",
+            side=Side.BUY,
+            price=Decimal("999999.99"),
+            quantity=1000,
+            order_type=OrderType.MARKET,
+            order_id="shock-buy-001",
+            is_mock=True,
+            source="external",
+        )
+        status, trades = engine.order_book.add_order(shock_buy)
+        assert status in (OrderStatus.CANCELLED, OrderStatus.FILLED)
+        assert shock_buy.remaining_qty == 0
+        assert engine.order_book.best_bid is None
+
+        # 模拟一个卖方冲击单（无对手盘）
+        shock_sell = Order(
+            symbol="000001.SZ",
+            side=Side.SELL,
+            price=Decimal("0.01"),
+            quantity=1000,
+            order_type=OrderType.MARKET,
+            order_id="shock-sell-001",
+            is_mock=True,
+            source="external",
+        )
+        status, trades = engine.order_book.add_order(shock_sell)
+        assert status in (OrderStatus.CANCELLED, OrderStatus.FILLED)
+        assert shock_sell.remaining_qty == 0
+        assert engine.order_book.best_ask is None
+
+
 class TestPersistenceActiveOrders:
     def test_get_active_orders_filters_status(self, tmp_path):
         pm = PersistenceManager(data_dir=str(tmp_path))

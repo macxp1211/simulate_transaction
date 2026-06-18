@@ -174,6 +174,11 @@ async def _restore_state():
             orders_by_symbol: Dict[str, List[Order]] = {}
             for od in active_order_dicts:
                 try:
+                    # 跳过 regime 冲击单等 mock 市价单：它们本应在撮合后撤销，
+                    # 不应作为限价单长期驻留在订单簿中
+                    if od.get("order_type", "").lower() == "market" and od.get("is_mock"):
+                        print(f"[Restore] 跳过 mock 市价单 {od.get('order_id')}")
+                        continue
                     order = Order.from_dict(od)
                     orders_by_symbol.setdefault(order.symbol, []).append(order)
                 except Exception as e:
@@ -1293,12 +1298,15 @@ async def _start_market_feed(symbol: str):
     # mock 订单仅用于构造盘口/队列，不参与真实账户冻结
     async def on_order(order_data: dict):
         participant_id = order_data.get("participant_id")
+        # mock 订单也可能是市价单（如 regime 冲击单），需要根据 order_type 创建
+        order_type_str = order_data.get("order_type", "limit").lower()
+        order_type = OrderType.MARKET if order_type_str == "market" else OrderType.LIMIT
         order = Order(
             symbol=order_data["symbol"],
             side=Side(order_data["side"]),
             price=Decimal(order_data["price"]),
             quantity=order_data["quantity"],
-            order_type=OrderType.LIMIT,
+            order_type=order_type,
             order_id=order_data["order_id"],
             is_mock=True,
             participant_id=participant_id,
