@@ -511,8 +511,9 @@ async def cancel_order(order_id: str, symbol: Optional[str] = None):
 
 @app.get("/api/v1/orders/{order_id}", response_model=OrderResponse)
 async def get_order(order_id: str, symbol: Optional[str] = None):
-    """查询单笔委托"""
+    """查询单笔委托（优先内存，其次持久化）"""
     try:
+        # 1. 优先从内存引擎查询最新状态
         order = None
         if symbol:
             order = engine_manager.get_order(symbol, order_id)
@@ -521,15 +522,27 @@ async def get_order(order_id: str, symbol: Optional[str] = None):
                 order = engine.get_order(order_id)
                 if order:
                     break
-        
-        if order is None:
-            raise HTTPException(status_code=404, detail="Order not found")
-        
-        return OrderResponse(
-            code=0,
-            message="success",
-            data=order.to_dict(),
+
+        if order is not None:
+            return OrderResponse(
+                code=0,
+                message="success",
+                data=order.to_dict(),
+            )
+
+        # 2. 内存中不存在，尝试从持久化数据库查询
+        db_orders = await _run_persistence(
+            persistence.get_orders, symbol, None, 10000
         )
+        for od in db_orders:
+            if od.get("order_id") == order_id:
+                return OrderResponse(
+                    code=0,
+                    message="success",
+                    data=od,
+                )
+
+        raise HTTPException(status_code=404, detail="Order not found")
     except HTTPException:
         raise
     except Exception as e:
@@ -544,29 +557,25 @@ async def list_orders(
     page: int = 1,
     page_size: int = 20,
 ):
-    """查询委托列表"""
+    """查询委托列表（从持久化数据库读取，确保提交过的订单一直可见）"""
     try:
-        orders = []
-        
-        engines = engine_manager.get_all_engines()
-        if symbol:
-            engines = {symbol: engines.get(symbol)} if symbol in engines else {}
-        
-        status_filter = OrderStatus(status) if status else None
-        side_filter = Side(side) if side else None
-        
-        for sym, engine in engines.items():
-            if engine is None:
-                continue
-            engine_orders = engine.order_book.get_all_orders(status_filter, side_filter)
-            orders.extend(engine_orders)
-        
+        # 从 SQLite 读取订单历史，而不是只读内存引擎
+        # 这样即使引擎被销毁、系统重启、订单已成交/撤销，用户仍能看到自己的订单
+        db_orders = await _run_persistence(
+            persistence.get_orders, symbol, status, 100000
+        )
+
+        # 可选按 side 过滤（数据库查询未覆盖）
+        if side:
+            side_lower = side.lower()
+            db_orders = [o for o in db_orders if o.get("side", "").lower() == side_lower]
+
         # 分页
-        total = len(orders)
+        total = len(db_orders)
         start = (page - 1) * page_size
         end = start + page_size
-        paginated = orders[start:end]
-        
+        paginated = db_orders[start:end]
+
         return OrderResponse(
             code=0,
             message="success",
@@ -574,7 +583,7 @@ async def list_orders(
                 "total": total,
                 "page": page,
                 "page_size": page_size,
-                "orders": [o.to_dict() for o in paginated],
+                "orders": paginated,
             },
         )
     except Exception as e:
