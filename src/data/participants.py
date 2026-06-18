@@ -745,9 +745,11 @@ class AlgorithmicTrader(MarketParticipant):
         price = self._slice_price
         if book_snapshot:
             if self._slice_side == "buy":
-                price = Decimal(str(book_snapshot.get("asks", [{}])[0].get("price", self._slice_price)))
+                asks = book_snapshot.get("asks") or [{}]
+                price = Decimal(str(asks[0].get("price", self._slice_price)))
             else:
-                price = Decimal(str(book_snapshot.get("bids", [{}])[0].get("price", self._slice_price)))
+                bids = book_snapshot.get("bids") or [{}]
+                price = Decimal(str(bids[0].get("price", self._slice_price)))
         self._slices_remaining -= 1
         if self._slices_remaining <= 0:
             self._target_order = None
