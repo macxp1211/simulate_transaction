@@ -48,6 +48,11 @@ class PersistenceManager:
                 cursor.execute("ALTER TABLE orders ADD COLUMN participant_id TEXT")
             except sqlite3.OperationalError:
                 pass
+            # 兼容旧表：添加 queue_info JSON 列
+            try:
+                cursor.execute("ALTER TABLE orders ADD COLUMN queue_info TEXT")
+            except sqlite3.OperationalError:
+                pass
             # 成交记录表
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS trades (
@@ -120,8 +125,9 @@ class PersistenceManager:
                 INSERT OR REPLACE INTO orders (
                     order_id, symbol, side, price, quantity, filled_qty, cancelled_qty,
                     status, order_type, is_mock, participant_id, create_time, update_time,
-                    queue_length_at_enter, queue_position_at_enter, leave_queue_time, reject_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    queue_length_at_enter, queue_position_at_enter, leave_queue_time, reject_reason,
+                    queue_info
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 order_dict.get("order_id"),
                 order_dict.get("symbol"),
@@ -140,6 +146,7 @@ class PersistenceManager:
                 qi.get("queue_position_at_enter") if qi else None,
                 qi.get("leave_queue_time") if qi else None,
                 order_dict.get("reject_reason"),
+                json.dumps(qi) if qi else None,
             ))
             conn.commit()
 
@@ -153,8 +160,9 @@ class PersistenceManager:
                     INSERT OR REPLACE INTO orders (
                         order_id, symbol, side, price, quantity, filled_qty, cancelled_qty,
                         status, order_type, is_mock, participant_id, create_time, update_time,
-                        queue_length_at_enter, queue_position_at_enter, leave_queue_time, reject_reason
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        queue_length_at_enter, queue_position_at_enter, leave_queue_time, reject_reason,
+                        queue_info
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     order_dict.get("order_id"),
                     order_dict.get("symbol"),
@@ -173,6 +181,7 @@ class PersistenceManager:
                     qi.get("queue_position_at_enter") if qi else None,
                     qi.get("leave_queue_time") if qi else None,
                     order_dict.get("reject_reason"),
+                    json.dumps(qi) if qi else None,
                 ))
             conn.commit()
 
@@ -194,7 +203,15 @@ class PersistenceManager:
             params.append(limit)
             cursor.execute(query, params)
             rows = cursor.fetchall()
-            return [dict(r) for r in rows]
+            results = [dict(r) for r in rows]
+            for r in results:
+                qi_json = r.pop("queue_info", None)
+                if qi_json:
+                    try:
+                        r["queue_info"] = json.loads(qi_json)
+                    except Exception:
+                        pass
+            return results
 
     def get_active_orders(self, symbol: Optional[str] = None, limit: int = 10000) -> List[dict]:
         """查询需要恢复的活跃订单（active/queued/partial）"""

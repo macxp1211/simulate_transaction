@@ -103,8 +103,10 @@ function renderOrders() {
     }
     el.innerHTML = myOrders.map(o => {
         const statusClass = o.status || 'pending';
-        const qInfo = o.queue_info ? `<br>队列位置: ${o.queue_info.current_queue_position}/${o.queue_info.current_queue_length}` : '';
-        const actions = (o.status === 'queued' || o.status === 'partial') 
+        const qInfo = (o.queue_info && o.queue_info.current_queue_position)
+            ? `<br>队列位置: ${o.queue_info.current_queue_position}/${o.queue_info.current_queue_length}`
+            : '';
+        const actions = (o.status === 'queued' || o.status === 'partial')
             ? `<button class="btn-cancel" onclick="cancelOrder('${o.order_id}')">撤单</button>` : '';
         return `<div class="order-item">
             <div class="order-header">
@@ -156,31 +158,22 @@ async function refreshTrades() {
     }
 }
 
-// 刷新我的订单状态
-async function refreshMyOrders() {
-    let changed = false;
-    const toRemove = [];
-    for (let i = 0; i < myOrders.length; i++) {
-        const o = myOrders[i];
-        if (o.status === 'filled' || o.status === 'cancelled' || o.status === 'rejected') continue;
-        try {
-            const data = await apiGet(`/api/v1/orders/${o.order_id}`);
-            if (data.code === 0 && data.data) {
-                myOrders[i] = data.data;
-                changed = true;
-            } else if (data.code !== 0) {
-                // 订单不存在或已失效，标记移除
-                toRemove.push(o.order_id);
-            }
-        } catch (err) {
-            console.error('刷新订单状态失败', err);
+// 从后端全量加载我的订单（页面切换/刷新后恢复显示）
+async function loadMyOrders() {
+    try {
+        const data = await apiGet('/api/v1/orders?page_size=1000');
+        if (data.code === 0 && data.data && data.data.orders) {
+            myOrders = data.data.orders;
+            renderOrders();
         }
+    } catch (err) {
+        console.error('加载订单历史失败', err);
     }
-    if (toRemove.length > 0) {
-        myOrders = myOrders.filter(o => !toRemove.includes(o.order_id));
-        changed = true;
-    }
-    if (changed) renderOrders();
+}
+
+// 刷新我的订单状态（改为全量加载，避免页面切换后 myOrders 为空）
+async function refreshMyOrders() {
+    await loadMyOrders();
 }
 
 // 刷新账户信息
@@ -324,6 +317,7 @@ document.addEventListener('DOMContentLoaded', () => {
     refreshOrderBook();
     refreshTrades();
     refreshAccount();
+    loadMyOrders();  // 页面加载/切换回来时从后端恢复订单列表
     connectWebSocket();
 
     // 定时刷新
