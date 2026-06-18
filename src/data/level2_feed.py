@@ -101,6 +101,7 @@ class MockLevel2Feed(Level2FeedHandler):
     def __init__(self, symbol: str = "000001.SZ", base_price: float = 10.50,
                  order_interval: float = 0.2, quote_interval: float = 1.0,
                  book_provider: Optional[Callable[[], Optional[dict]]] = None,
+                 queue_size_provider: Optional[Callable[[], int]] = None,
                  participant_config: Optional[dict] = None):
         super().__init__()
         self.symbol = symbol
@@ -108,10 +109,13 @@ class MockLevel2Feed(Level2FeedHandler):
         self.order_interval = order_interval
         self.quote_interval = quote_interval
         self.book_provider = book_provider
+        self.queue_size_provider = queue_size_provider
 
         self._current_price = self.base_price
         self._task: Optional[asyncio.Task] = None
         self._regime: str = "normal"
+        self._max_orders_per_tick = 30  # 每 tick 最多生成 30 笔委托
+        self._queue_pressure_threshold = 50  # 事件队列超过此长度时暂停 mock 订单
 
         # 参与者注册表
         from ..data.participants import ParticipantRegistry
@@ -194,6 +198,11 @@ class MockLevel2Feed(Level2FeedHandler):
         while self._running:
             await asyncio.sleep(self.order_interval)
 
+            # 背压控制：如果撮合引擎队列积压，跳过本 tick 的 mock 订单生成
+            if self.queue_size_provider and self.queue_size_provider() > self._queue_pressure_threshold:
+                print(f"[Feed] {self.symbol} engine queue backpressure, skipping tick")
+                continue
+
             snapshot = self._get_book_snapshot()
 
             # 更新共享市场状态的订单簿不平衡指标
@@ -207,15 +216,21 @@ class MockLevel2Feed(Level2FeedHandler):
                 await self._emit_order(shock_order)
 
             # 每次循环重新获取参与者，以便 registry 重建或参数更新后生效
+            emitted = 0
             for p in self.registry.get_participants():
+                if not self._running:
+                    break
                 if not p.active:
                     continue
+                if emitted >= self._max_orders_per_tick:
+                    break
 
                 # 生成委托
                 order = p.generate_order(snapshot)
                 if order:
                     await self._emit_order(order)
                     p.on_order_queued(order)
+                    emitted += 1
 
                 # 生成撤单
                 cancel = p.generate_cancel(snapshot)

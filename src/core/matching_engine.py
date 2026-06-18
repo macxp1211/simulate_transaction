@@ -482,7 +482,7 @@ class SymbolMatchingEngine:
     # ─────────── 公共接口 ───────────
     
     async def place_order(self, order: Order) -> Order:
-        """提交委托"""
+        """提交委托并等待处理完成（用于用户订单）"""
         if not self._running or (self._task and self._task.done()):
             await self.start()
         done = asyncio.Event()
@@ -493,6 +493,23 @@ class SymbolMatchingEngine:
             await self._event_queue.put(event)
         await done.wait()
         return order
+
+    async def submit_order(self, order: Order) -> None:
+        """提交委托但不等待结果（用于 mock 行情订单，避免阻塞行情源）"""
+        if not self._running or (self._task and self._task.done()):
+            await self.start()
+        event = {"type": "order", "order": order}
+        if self._latency_injector is not None and self._latency_injector.get_latency(order.source) > 0:
+            await self._latency_injector.inject(event, source=order.source)
+        else:
+            await self._event_queue.put(event)
+
+    def queue_size(self) -> int:
+        """获取事件队列当前长度（用于背压控制）"""
+        try:
+            return self._event_queue.qsize()
+        except Exception:
+            return 0
 
     async def cancel_order(self, order_id: str) -> Optional[Order]:
         """撤销委托"""
@@ -585,10 +602,20 @@ class MatchingEngineManager:
             return self._engines[symbol]
     
     async def place_order(self, order: Order) -> Order:
-        """提交委托到对应标的引擎"""
+        """提交委托到对应标的引擎并等待处理完成"""
         engine = await self.get_or_create_engine(order.symbol)
         return await engine.place_order(order)
-    
+
+    async def submit_order(self, order: Order) -> None:
+        """提交委托到对应标的引擎但不等待结果（用于 mock 订单）"""
+        engine = await self.get_or_create_engine(order.symbol)
+        await engine.submit_order(order)
+
+    def get_queue_size(self, symbol: str) -> int:
+        """获取指定标的事件队列长度"""
+        engine = self._engines.get(symbol)
+        return engine.queue_size() if engine else 0
+
     async def cancel_order(self, symbol: str, order_id: str) -> Optional[Order]:
         """撤销委托"""
         engine = await self.get_or_create_engine(symbol)

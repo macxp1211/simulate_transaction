@@ -1509,7 +1509,34 @@ class ParticipantRegistry:
             p._copy_state_from(old.get(pid))
             self._participants[pid] = p
 
+    # 各类参与者数量上限，防止用户配置过高导致系统过载
+    MAX_COUNTS = {
+        "market_maker_count": 10,
+        "trend_follower_count": 10,
+        "mean_reversion_count": 10,
+        "noise_trader_count": 20,
+        "aggressive_trader_count": 10,
+        "algorithmic_trader_count": 5,
+        "stop_loss_trader_count": 10,
+        "order_book_imbalance_count": 10,
+        "iceberg_participant_count": 5,
+        "directional_trader_count": 10,
+        "chip_collector_count": 10,
+        "day_trader_count": 10,
+    }
+    MIN_ORDER_INTERVAL = 0.05  # 最小订单生成间隔（秒）
+
     def update_config(self, config: Dict):
+        # 限制数量上限和最小间隔，避免用户配置压垮系统
+        for key, max_val in self.MAX_COUNTS.items():
+            if key in config and isinstance(config[key], (int, float)):
+                config[key] = max(0, min(int(config[key]), max_val))
+        if "order_interval" in config:
+            try:
+                config["order_interval"] = max(self.MIN_ORDER_INTERVAL, float(config["order_interval"]))
+            except Exception:
+                pass
+
         self._config.update(config)
         rebuild = False
         for key in ["market_maker_count", "trend_follower_count", "mean_reversion_count",

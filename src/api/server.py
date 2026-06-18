@@ -1317,10 +1317,14 @@ async def _start_market_feed(symbol: str):
         engine = engine_manager.get_all_engines().get(symbol)
         return engine.get_orderbook_snapshot(depth=5) if engine else None
 
+    def queue_size_provider():
+        return engine_manager.get_queue_size(symbol)
+
     config = participant_config_cache.get(symbol)
     feed = MockLevel2Feed(
         symbol=symbol,
         book_provider=book_provider,
+        queue_size_provider=queue_size_provider,
         participant_config=config,
     )
     feed_handlers[symbol] = feed
@@ -1348,7 +1352,8 @@ async def _start_market_feed(symbol: str):
             f"[Feed] {participant_id or 'unknown'} placed {order.side.value} "
             f"order {order.order_id} @ {order.price} x {order.quantity}"
         )
-        await engine_manager.place_order(order)
+        # mock 订单使用 fire-and-forget，避免行情源被撮合引擎队列阻塞
+        await engine_manager.submit_order(order)
 
     feed.on_order(on_order)
 
