@@ -216,6 +216,9 @@ class Order:
         if self.participant_id:
             result["participant_id"] = self.participant_id
         
+        result["is_mock"] = self.is_mock
+        result["source"] = self.source
+
         if self.queue_info:
             result["queue_info"] = {
                 "queue_length_at_enter": self.queue_info.queue_length_at_enter,

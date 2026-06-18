@@ -290,6 +290,22 @@ async def startup_event():
         if len(ph) > max_price_history:
             ph.pop(0)
 
+        # 动态调整昨收价基准，避免价格笼子/涨跌停过早把盘口卡死
+        try:
+            from src.core.market_rules import get_market_rules, update_previous_close
+            rules = get_market_rules(trade.symbol)
+            engine = engine_manager.get_engine(trade.symbol)
+            last = engine._last_trade_price if engine else None
+            if last and rules.previous_close and rules.previous_close > 0:
+                deviation = abs(last - rules.previous_close) / rules.previous_close
+                # 当最新成交价偏离昨收超过 5% 时，平滑移动昨收基准
+                if deviation > Decimal("0.05"):
+                    new_close = (rules.previous_close * Decimal("0.7") + last * Decimal("0.3")).quantize(Decimal("0.01"))
+                    update_previous_close(trade.symbol, new_close)
+                    print(f"[MarketRules] {trade.symbol} previous_close adjusted {rules.previous_close} -> {new_close} (last={last})")
+        except Exception as e:
+            print(f"[MarketRules] adjust previous_close error: {e}")
+
     engine_manager.on_trade_generated(on_trade_generated)
 
     # 启动默认标的的模拟行情源

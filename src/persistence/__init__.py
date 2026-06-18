@@ -112,9 +112,31 @@ class PersistenceManager:
                     sharpe_ratio REAL
                 )
             """)
+            # 修复旧数据：participant_id 非空的订单应标记为 mock
+            try:
+                cursor.execute("""
+                    UPDATE orders
+                    SET is_mock = 1
+                    WHERE (participant_id IS NOT NULL AND participant_id != '') AND is_mock = 0
+                """)
+                if cursor.rowcount > 0:
+                    print(f"[Persistence] 修复 {cursor.rowcount} 条旧 mock 订单标记")
+            except Exception:
+                pass
             conn.commit()
 
     # ─────────── 订单持久化 ───────────
+
+    def _is_mock_order(self, order_dict: dict) -> bool:
+        """判断订单是否为 mock 参与者订单"""
+        if order_dict.get("is_mock"):
+            return True
+        if order_dict.get("source") == "external":
+            return True
+        participant_id = order_dict.get("participant_id")
+        if participant_id and str(participant_id).strip():
+            return True
+        return False
 
     def save_order(self, order_dict: dict):
         """保存或更新订单"""
@@ -138,7 +160,7 @@ class PersistenceManager:
                 order_dict.get("cancelled_qty", 0),
                 order_dict.get("status"),
                 order_dict.get("order_type"),
-                1 if order_dict.get("is_mock") else 0,
+                1 if self._is_mock_order(order_dict) else 0,
                 order_dict.get("participant_id"),
                 order_dict.get("create_time"),
                 order_dict.get("update_time"),
@@ -173,7 +195,7 @@ class PersistenceManager:
                     order_dict.get("cancelled_qty", 0),
                     order_dict.get("status"),
                     order_dict.get("order_type"),
-                    1 if order_dict.get("is_mock") else 0,
+                    1 if self._is_mock_order(order_dict) else 0,
                     order_dict.get("participant_id"),
                     order_dict.get("create_time"),
                     order_dict.get("update_time"),
@@ -202,6 +224,9 @@ class PersistenceManager:
             if is_mock is not None:
                 query += " AND is_mock = ?"
                 params.append(1 if is_mock else 0)
+                # 兜底：旧数据可能 is_mock 标记错误，但 participant_id 非空的仍是 mock 订单
+                if not is_mock:
+                    query += " AND (participant_id IS NULL OR participant_id = '')"
             query += " ORDER BY create_time DESC LIMIT ?"
             params.append(limit)
             cursor.execute(query, params)
@@ -224,6 +249,8 @@ class PersistenceManager:
             query = """
                 SELECT * FROM orders
                 WHERE status IN ('active', 'queued', 'partial')
+                  AND is_mock = 0
+                  AND (participant_id IS NULL OR participant_id = '')
             """
             params = []
             if symbol:

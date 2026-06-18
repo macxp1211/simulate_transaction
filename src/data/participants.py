@@ -697,8 +697,9 @@ class AggressiveTrader(MarketParticipant):
         else:
             return None
         self._cooldown = random.randint(3, 8)
-        price = self._clamp_price(price, book_snapshot)
-        return self._create_order(side, price, qty)
+        order = self._create_order(side, price, qty)
+        order["order_type"] = "market"  # 主动吃单：市价单未成交部分立即撤销，不污染订单簿
+        return order
 
     def generate_cancel(self, book_snapshot: Optional[Dict]) -> Optional[Dict]:
         return None
@@ -818,8 +819,9 @@ class StopLossTrader(MarketParticipant):
                     self._stop_price = mid * (Decimal("1") + self.stop_loss_pct)
                     self._profit_price = mid * (Decimal("1") - self.take_profit_pct)
                 self._position_side = side
-                price = self._clamp_price(mid, book_snapshot)
-                return self._create_order(side, price, self._position_qty)
+                order = self._create_order(side, mid, self._position_qty)
+                order["order_type"] = "market"
+                return order
             return None
         if self._closing_order_id is not None:
             return None
@@ -832,8 +834,8 @@ class StopLossTrader(MarketParticipant):
                 triggered = True
         if triggered:
             close_side = "sell" if self._position_side == "buy" else "buy"
-            price = self._clamp_price(mid, book_snapshot)
-            order = self._create_order(close_side, price, self._position_qty)
+            order = self._create_order(close_side, mid, self._position_qty)
+            order["order_type"] = "market"
             self._closing_order_id = order["order_id"]
             return order
         return None
