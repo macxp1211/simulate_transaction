@@ -186,7 +186,7 @@ class PersistenceManager:
             conn.commit()
 
     def get_orders(self, symbol: Optional[str] = None, status: Optional[str] = None,
-                   limit: int = 1000) -> List[dict]:
+                   is_mock: Optional[bool] = None, limit: int = 1000) -> List[dict]:
         """查询订单历史"""
         with sqlite3.connect(self._db_path) as conn:
             conn.row_factory = sqlite3.Row
@@ -199,6 +199,9 @@ class PersistenceManager:
             if status:
                 query += " AND status = ?"
                 params.append(status)
+            if is_mock is not None:
+                query += " AND is_mock = ?"
+                params.append(1 if is_mock else 0)
             query += " ORDER BY create_time DESC LIMIT ?"
             params.append(limit)
             cursor.execute(query, params)

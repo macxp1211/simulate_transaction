@@ -161,7 +161,7 @@ async function refreshTrades() {
 // 从后端全量加载我的订单（页面切换/刷新后恢复显示）
 async function loadMyOrders() {
     try {
-        const data = await apiGet('/api/v1/orders?page_size=1000');
+        const data = await apiGet('/api/v1/orders?mine=true&page_size=1000');
         if (data.code === 0 && data.data && data.data.orders) {
             myOrders = data.data.orders;
             renderOrders();

@@ -554,15 +554,21 @@ async def list_orders(
     symbol: Optional[str] = None,
     status: Optional[str] = None,
     side: Optional[str] = None,
+    mine: Optional[bool] = False,
     page: int = 1,
     page_size: int = 20,
 ):
-    """查询委托列表（从持久化数据库读取，确保提交过的订单一直可见）"""
+    """查询委托列表（从持久化数据库读取，确保提交过的订单一直可见）
+
+    参数 mine=true 时只返回用户自己提交的订单（is_mock=false），
+    过滤掉 mock 参与者订单，避免"我的订单"中混入市场成交记录。
+    """
     try:
         # 从 SQLite 读取订单历史，而不是只读内存引擎
         # 这样即使引擎被销毁、系统重启、订单已成交/撤销，用户仍能看到自己的订单
+        is_mock_filter = False if mine else None
         db_orders = await _run_persistence(
-            persistence.get_orders, symbol, status, 100000
+            persistence.get_orders, symbol, status, is_mock_filter, 100000
         )
 
         # 可选按 side 过滤（数据库查询未覆盖）
