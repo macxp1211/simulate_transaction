@@ -1,383 +1,733 @@
-# 高精度队列模拟撮合系统 - 架构设计文档
+# 系统架构设计文档
+
+> 本文档描述高精度队列模拟撮合系统的整体架构、核心模块关系、数据流与并发模型。
+
+---
 
 ## 1. 系统概述
 
-本系统是一个基于 **Level-2 逐笔成交和盘口行情** 的高精度队列模拟撮合系统。核心特性包括：
+本系统是一个基于 **Level-2 逐笔成交与盘口行情** 的高精度队列模拟撮合系统，核心设计目标：
 
-- **逐笔驱动**：基于真实 Level-2 逐笔成交数据驱动撮合逻辑
-- **价格优先**：撮合严格遵循价格优先、时间优先原则
-- **队列模拟**：非最优价委托进入队列排队，记录队列长度
-- **队列消耗**：当市场成交价格优于或等于队列委托价格时，按 FIFO 顺序消耗队列
-- **实时撮合**：支持外部 API 委托接入，实时响应行情变化
+1. **逐笔级精度**：每个逐笔成交事件触发一次队列扫描，精确模拟 FIFO 消耗
+2. **价格优先 + 时间优先**：严格遵循交易所撮合规则
+3. **队列透明化**：记录进入位置、队列长度、等待时间，支持策略分析
+4. **A 股真实规则**：涨跌停、价格笼子、最小变动、T+1 冻结、费用模型
+5. **智能行情模拟**：12 类参与者独立策略、虚拟账户、共享市场状态
+6. **实时可观测**：REST API + WebSocket 实时推送，前端可视化监控
 
-## 2. 系统架构
+---
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    外部客户端 / 策略系统                      │
-│              (REST API / WebSocket / gRPC)                  │
-└──────────────────┬──────────────────────────────────────────┘
-                   │ 委托下单 / 撤单 / 查询
-┌──────────────────▼──────────────────────────────────────────┐
-│                    API Gateway (FastAPI)                      │
-│              • 委托接收与校验                                 │
-│              • 订单查询与状态跟踪                              │
-│              • 实时推送 (WebSocket)                           │
-└──────────────────┬──────────────────────────────────────────┘
-                   │
-┌──────────────────▼──────────────────────────────────────────┐
-│                    撮合核心引擎 (Matching Engine)              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐    │
-│  │  订单簿       │  │  队列管理器   │  │  撮合执行器       │    │
-│  │  OrderBook   │  │ QueueManager │  │ MatchingExecutor │    │
-│  │              │  │              │  │                  │    │
-│  │ • Bid队列    │  │ • 新委托入队  │  │ • 价格交叉检测    │    │
-│  │ • Ask队列    │  │ • 队列长度记录│  │ • 成交量计算      │    │
-│  │ • 价格索引   │  │ • 行情触发消耗│  │ • 成交记录生成    │    │
-│  └──────────────┘  └──────────────┘  └──────────────────┘    │
-└──────────────────┬──────────────────────────────────────────┘
-                   │
-┌──────────────────▼──────────────────────────────────────────┐
-│                    Level-2 行情接入层                          │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐    │
-│  │  逐笔成交    │  │  盘口快照    │  │  行情解析器       │    │
-│  │  Trade Feed  │  │  Quote Feed  │  │   Parser         │    │
-│  │              │  │              │  │                  │    │
-│  │ • 成交价格   │  │ • 买卖十档   │  │ • 数据标准化      │    │
-│  │ • 成交数量   │  │ • 队列长度   │  │ • 时间戳对齐      │    │
-│  │ • 成交方向   │  │ • 委托总量   │  │ • 事件分发        │    │
-│  └──────────────┘  └──────────────┘  └──────────────────┘    │
-└─────────────────────────────────────────────────────────────┘
-```
+## 2. 整体架构
 
-## 3. 核心模块设计
+```mermaid
+flowchart TB
+    subgraph Client["外部接入层"]
+        direction TB
+        WebUI["Web 前端\n(委托终端 / 监控面板)"]
+        AlgoSys["算法交易系统\n(REST API 接入)"]
+        RLAgent["RL 训练 Agent\n(WebSocket 订阅)"]
+    end
 
-### 3.1 订单模型 (Order)
+    subgraph Gateway["API Gateway"]
+        direction TB
+        FastAPI["FastAPI 应用"]
+        REST["REST Router\n(委托 / 查询 / 配置)"]
+        WSManager["WebSocket Manager\n(订阅管理 / 广播)"]
+    end
 
-```python
-class Order:
-    order_id: str          # 唯一订单ID
-    symbol: str            # 标的代码
-    side: Side             # 买卖方向: BUY / SELL
-    price: Decimal         # 委托价格
-    quantity: int          # 委托数量
-    filled_qty: int        # 已成交数量
-    status: OrderStatus    # 订单状态
-    
-    # 队列相关字段
-    queue_position: int     # 进入队列时的位置（前面有多少订单）
-    queue_length: int       # 进入队列时的总队列长度
-    enter_queue_time: datetime  # 进入队列时间
-    leave_queue_time: datetime  # 离开队列时间（成交或撤单）
-    
-    create_time: datetime   # 订单创建时间
-    update_time: datetime   # 最后更新时间
-```
+    subgraph Core["撮合核心层"]
+        direction TB
+        EngineMgr["MatchingEngineManager\n(多标的管理)"]
+        SME["SymbolMatchingEngine\n(单标的异步事件循环)"]
+        OB["OrderBook\n(SortedDict + PriceLevel)"]
+        AC["Account\n(T+1 / 冻结 / 费用)"]
+        LI["LatencyInjector\n(延迟注入)"]
+        Rules["MarketRules\n(涨跌停 / 价格笼子)"]
+    end
 
-### 3.2 订单簿 (OrderBook)
+    subgraph Market["行情模拟层"]
+        direction TB
+        Feed["MockLevel2Feed\n(异步 tick 生成)"]
+        Registry["ParticipantRegistry\n(12 类策略工厂)"]
+        Participants["12 类 MarketParticipant\n(独立虚拟账户 + 策略)"]
+        SharedState["SharedMarketState\n(EWMA 波动率 / 订单流不平衡)"]
+        Regime["MarketRegime\n(冲击订单注入)"]
+    end
 
-订单簿采用 **价格层级 + 时间队列** 的双层结构：
+    subgraph Persist["持久化层"]
+        direction TB
+        SQLite[(SQLite DB)]
+        Leaderboard["Leaderboard\n(10s 周期排名计算)"]
+    end
 
-```
-OrderBook
-├── bids: SortedDict[price -> List[Order]]   # 买队列，按价格降序
-├── asks: SortedDict[price -> List[Order]]   # 卖队列，按价格升序
-├── price_index: Dict[order_id -> price]     # 订单价格索引，用于O(1)定位
-└── queue_counter: Dict[price -> int]        # 各价格层级队列计数器
+    Client -->|HTTP / WS| FastAPI
+    FastAPI --> REST
+    FastAPI --> WSManager
+    REST -->|路由订单| EngineMgr
+    EngineMgr -->|创建 / 路由| SME
+    SME -->|校验| Rules
+    SME -->|风控| AC
+    SME -->|撮合| OB
+    SME -->|延迟| LI
+    Feed -->|模拟委托| REST
+    Feed -->|更新| SharedState
+    Participants -->|策略信号| Feed
+    Registry -->|管理| Participants
+    Regime -->|冲击订单| Feed
+    SME -->|持久化| SQLite
+    SME -->|排名数据| Leaderboard
+    Leaderboard -->|广播| WSManager
+    WSManager -->|实时推送| Client
+
+    style Client fill:#f0f9ff,stroke:#bae6fd
+    style Gateway fill:#f0fdf4,stroke:#86efac
+    style Core fill:#fefce8,stroke:#fde047
+    style Market fill:#faf5ff,stroke:#d8b4fe
+    style Persist fill:#fff1f2,stroke:#fda4af
 ```
 
-**关键操作复杂度**：
-- 插入订单: O(log N) 价格定位 + O(1) 队列追加
-- 删除订单: O(1) 通过 price_index 定位
-- 最优价格查询: O(1) 通过 sorted dict 的 first/last
-- 队列长度查询: O(1) 通过 queue_counter
+---
 
-### 3.3 撮合引擎 (MatchingEngine)
+## 3. 核心模块类图
 
-撮合引擎是系统的核心，处理两类事件：
+### 3.1 订单与成交模型
 
-**A. 委托事件 (OrderEvent)**
+```mermaid
+classDiagram
+    class Side {
+        <<enumeration>>
+        BUY
+        SELL
+    }
 
-```
-买入委托 (价格 = P, 数量 = Q):
-    1. 查询最优卖价 ask1
-    2. 如果 P >= ask1:
-         → 立即撮合：按 ask 队列 FIFO 顺序成交，直到 Q == 0 或 P < ask_price
-         → 记录成交明细
-    3. 如果 P < ask1:
-         → 进入买方队列对应价格层级
-         → 记录当前该价格层级的 queue_length（队列总长度）
-         → 记录 queue_position（该订单进入时的位置）
-         → 订单状态变为 QUEUED
+    class OrderStatus {
+        <<enumeration>>
+        PENDING
+        ACTIVE
+        QUEUED
+        PARTIAL
+        FILLED
+        CANCELLED
+        REJECTED
+    }
 
-卖出委托 (价格 = P, 数量 = Q):
-    1. 查询最优买价 bid1
-    2. 如果 P <= bid1:
-         → 立即撮合：按 bid 队列 FIFO 顺序成交，直到 Q == 0 或 P > bid_price
-         → 记录成交明细
-    3. 如果 P > bid1:
-         → 进入卖方队列对应价格层级
-         → 记录 queue_length 和 queue_position
-         → 订单状态变为 QUEUED
-```
+    class OrderType {
+        <<enumeration>>
+        LIMIT
+        MARKET
+    }
 
-**B. 逐笔成交事件 (TradeEvent)**
+    class Order {
+        +str order_id
+        +str symbol
+        +Side side
+        +Decimal price
+        +int quantity
+        +int filled_qty
+        +OrderStatus status
+        +OrderType order_type
+        +QueueInfo queue_info
+        +List~TradeRecord~ trades
+        +datetime create_time
+        +datetime update_time
+        +str reject_reason
+        +str source
+        +str participant_id
+        +bool is_mock
+        +bool is_active
+        +int remaining_qty
+        +cancel()
+        +fill(quantity, price)
+        +partial_fill(quantity, price)
+        +to_dict()
+    }
 
-当收到新的逐笔成交数据时，引擎检查队列中的订单：
+    class QueueInfo {
+        +int queue_length
+        +int queue_position
+        +datetime enter_queue_time
+        +datetime leave_queue_time
+        +int current_queue_length
+        +int current_queue_position
+        +to_dict()
+    }
 
-```
-逐笔成交 (价格 = T, 数量 = TQ, 方向 = D):
-    对于买方队列（被动消耗）:
-        从最优买价开始，向下遍历各价格层级:
-            如果该笔逐笔成交是卖方主动成交（外盘/内盘判断）:
-                从该价格层级的队首开始消耗订单:
-                    - 每消耗一个订单，减少 TQ
-                    - 当 TQ == 0 时停止
-                    - 被消耗的订单状态变为 FILLED（全部成交）或 PARTIAL（部分成交）
-                
-    对于卖方队列:
-        从最优卖价开始，向上遍历各价格层级:
-            如果该笔逐笔成交是买方主动成交:
-                从该价格层级的队首开始消耗订单
-                ...
-```
+    class TradeRecord {
+        +str trade_id
+        +str order_id
+        +str symbol
+        +Side side
+        +Decimal price
+        +int quantity
+        +datetime trade_time
+        +str match_source
+        +str trigger_trade_id
+        +to_dict()
+    }
 
-### 3.4 队列消耗算法
-
-这是系统的核心算法，决定了模拟撮合的精度：
-
-```python
-def consume_queue_on_trade(self, trade: TradeEvent):
-    """
-    当逐笔成交发生时，根据成交价格消耗队列中的订单。
-    
-    核心逻辑:
-    1. 逐笔成交价格代表了该时刻市场的真实成交价
-    2. 所有队列中价格优于或等于该成交价的订单，理论上应该被成交
-    3. 按价格层级 + FIFO 顺序消耗
-    """
-    if trade.is_buy_initiated():  # 买方主动成交（外盘）
-        # 从卖方队列中，价格 <= trade.price 的订单应被消耗
-        for price_level in self.asks.iter_prices(max_price=trade.price):
-            remaining = trade.quantity
-            for order in price_level.orders:
-                if remaining <= 0:
-                    break
-                fill_qty = min(order.remaining_qty, remaining)
-                self.execute_partial(order, fill_qty, trade)
-                remaining -= fill_qty
-                
-    elif trade.is_sell_initiated():  # 卖方主动成交（内盘）
-        # 从买方队列中，价格 >= trade.price 的订单应被消耗
-        for price_level in self.bids.iter_prices(min_price=trade.price):
-            remaining = trade.quantity
-            for order in price_level.orders:
-                if remaining <= 0:
-                    break
-                fill_qty = min(order.remaining_qty, remaining)
-                self.execute_partial(order, fill_qty, trade)
-                remaining -= fill_qty
+    Order --> Side
+    Order --> OrderStatus
+    Order --> OrderType
+    Order --> QueueInfo
+    Order --> TradeRecord
 ```
 
-### 3.5 行情接入设计
+### 3.2 订单簿
 
-```python
-class Level2FeedHandler:
-    """Level-2 行情处理器"""
-    
-    async def on_trade(self, trade_data: dict):
-        """逐笔成交回调"""
-        trade = TradeEvent.from_raw(trade_data)
-        # 驱动撮合引擎
-        await self.engine.process_trade(trade)
-        
-    async def on_quote(self, quote_data: dict):
-        """盘口快照回调"""
-        quote = QuoteEvent.from_raw(quote_data)
-        # 更新订单簿的参考价格
-        self.engine.order_book.update_reference_prices(quote)
+```mermaid
+classDiagram
+    class OrderBook {
+        +str symbol
+        +SortedDict bids
+        +SortedDict asks
+        +Dict price_index
+        +Dict queue_counter
+        +List _all_orders
+        +place_order(Order) Tuple~List~TradeRecord~~, Order~
+        +cancel_order(str) Order
+        +get_orderbook_snapshot(int) Dict
+        +get_best_bid() Decimal
+        +get_best_ask() Decimal
+        +consume_queue_on_trade(Dict) List~Order~
+        +partial_cancel(Decimal, int, str) List~Order~
+    }
+
+    class PriceLevel {
+        +Decimal price
+        +List orders
+        +int total_quantity
+        +append(Order)
+        +remove(str) Order
+        +partial_cancel(int, str) List~Order~
+        +get_snapshot() Dict
+    }
+
+    class SimpleSortedDict {
+        +Dict _data
+        +List _keys
+        +__setitem__(key, value)
+        +__getitem__(key)
+        +__delitem__(key)
+        +keys()
+        +first_key()
+        +last_key()
+    }
+
+    OrderBook --> PriceLevel
+    OrderBook --> SimpleSortedDict
 ```
+
+### 3.3 撮合引擎
+
+```mermaid
+classDiagram
+    class MatchingEngineManager {
+        +Dict engines
+        +Account account
+        +FeeCalculator fee_calculator
+        +List _trade_callbacks
+        +get_or_create_engine(str) SymbolMatchingEngine
+        +place_order(Order) Order
+        +cancel_order(str, str) Order
+        +get_order(str, str) Order
+        +get_all_orders() List~Order~
+        +get_all_engines() Dict
+        +on_trade_generated(callback)
+        +process_cancel_feed(str, Dict)
+    }
+
+    class SymbolMatchingEngine {
+        +str symbol
+        +MatchingConfig config
+        +OrderBook order_book
+        +Account account
+        +FeeCalculator fee_calculator
+        +asyncio.Queue event_queue
+        +asyncio.Task task
+        +List _trade_callbacks
+        +bool running
+        +start()
+        +stop()
+        +place_order(Order) Order
+        +cancel_order(str) Order
+        +process_cancel_feed(Dict)
+        +get_orderbook_snapshot(int) Dict
+        +get_stats() Dict
+    }
+
+    class MatchingConfig {
+        +Decimal price_tick
+        +int lot_size
+        +int max_queue_depth
+        +bool enable_queue_simulation
+        +Decimal price_limit_up
+        +Decimal price_limit_down
+        +MarketType market_type
+        +Decimal previous_close
+    }
+
+    class MarketType {
+        <<enumeration>>
+        MAIN_BOARD
+        ST_BOARD
+        STAR_MARKET
+        CHINEXT
+        BSE
+    }
+
+    MatchingEngineManager --> SymbolMatchingEngine
+    SymbolMatchingEngine --> OrderBook
+    SymbolMatchingEngine --> MatchingConfig
+    MatchingConfig --> MarketType
+```
+
+### 3.4 账户与费用
+
+```mermaid
+classDiagram
+    class Account {
+        +str account_id
+        +Decimal cash
+        +Decimal frozen_cash
+        +int available_position
+        +int frozen_position
+        +int today_bought_position
+        +Decimal total_fees
+        +int trade_count
+        +Decimal initial_cash
+        +int initial_position
+        +can_buy(Decimal, int) bool
+        +can_sell(int) bool
+        +freeze_buy(Decimal, int)
+        +freeze_sell(int)
+        +settle_buy(int, Decimal, Decimal)
+        +settle_sell(int, Decimal, Decimal)
+        +unfreeze_buy(int, Decimal)
+        +unfreeze_sell(int)
+        +settle_day_end()
+        +get_snapshot() Dict
+    }
+
+    class FeeCalculator {
+        <<abstract>>
+        +calculate_buy_fee(Decimal, int) Decimal
+        +calculate_sell_fee(Decimal, int) Decimal
+    }
+
+    class AShareFeeCalculator {
+        +Decimal commission_rate
+        +Decimal min_commission
+        +Decimal stamp_tax_rate
+        +Decimal transfer_fee_rate
+        +Decimal transfer_fee_min
+        +calculate_buy_fee(Decimal, int) Decimal
+        +calculate_sell_fee(Decimal, int) Decimal
+    }
+
+    FeeCalculator <|-- AShareFeeCalculator
+```
+
+### 3.5 市场规则
+
+```mermaid
+classDiagram
+    class MarketRules {
+        +Decimal previous_close
+        +MarketType market_type
+        +Decimal price_tick
+        +int lot_size
+        +Decimal price_limit_ratio
+        +Decimal upper_limit
+        +Decimal lower_limit
+        +Decimal price_cage_upper
+        +Decimal price_cage_lower
+        +validate_price(Decimal, Decimal) Tuple~bool, str~
+        +validate_quantity(int) Tuple~bool, str~
+        +validate_order(Decimal, int, Decimal) Tuple~bool, str~
+        +clamp_to_limit(Decimal) Decimal
+        +get_price_cage_bounds(Decimal) Tuple~Decimal, Decimal~
+        +to_dict() Dict
+        +update_previous_close(Decimal)
+    }
+
+    class MarketType {
+        <<enumeration>>
+        MAIN_BOARD
+        ST_BOARD
+        STAR_MARKET
+        CHINEXT
+        BSE
+    }
+
+    MarketRules --> MarketType
+```
+
+### 3.6 行情参与者
+
+```mermaid
+classDiagram
+    class MarketParticipant {
+        <<abstract>>
+        +str participant_id
+        +str symbol
+        +Decimal base_price
+        +Decimal target_price
+        +float order_interval
+        +bool active
+        +Decimal cash
+        +int position
+        +Decimal total_fees
+        +int total_trades
+        +List _pending_orders
+        +generate_order(Dict) Dict
+        +generate_cancel(Dict) Dict
+        +on_order_filled(str, Dict)
+        +on_order_queued(Dict)
+        +get_stats() Dict
+    }
+
+    class MarketMaker {
+        +Decimal base_spread
+        +Decimal inventory_skew
+        +int max_inventory
+        +generate_order(Dict) Dict
+    }
+
+    class TrendFollower {
+        +int window_size
+        +Decimal momentum_threshold
+        +generate_order(Dict) Dict
+    }
+
+    class MeanReversionTrader {
+        +int ma_window
+        +Decimal deviation_threshold
+        +generate_order(Dict) Dict
+    }
+
+    class NoiseTrader {
+        +float irrational_prob
+        +float cancel_prob
+        +generate_order(Dict) Dict
+    }
+
+    class AggressiveTrader {
+        +float burst_prob
+        +int min_depth
+        +int cooldown
+        +generate_order(Dict) Dict
+    }
+
+    class AlgorithmicTrader {
+        +str algo_type
+        +int slice_count
+        +generate_order(Dict) Dict
+    }
+
+    class StopLossTrader {
+        +Decimal stop_loss_pct
+        +Decimal take_profit_pct
+        +generate_order(Dict) Dict
+    }
+
+    class OrderBookImbalanceTrader {
+        +float imbalance_threshold
+        +generate_order(Dict) Dict
+    }
+
+    class IcebergParticipant {
+        +float visible_ratio
+        +generate_order(Dict) Dict
+    }
+
+    class DirectionalTrader {
+        +Decimal urgency
+        +int max_position
+        +generate_order(Dict) Dict
+    }
+
+    class ChipCollector {
+        +int target_position
+        +generate_order(Dict) Dict
+    }
+
+    class DayTrader {
+        +int max_holding_ticks
+        +Decimal stop_loss_pct
+        +Decimal profit_target_pct
+        +generate_order(Dict) Dict
+    }
+
+    class ParticipantRegistry {
+        +Dict _participants
+        +Dict _config
+        +build_default_participants()
+        +update_config(Dict)
+        +get_all_stats() List~Dict~
+    }
+
+    class SharedMarketState {
+        +List last_trades
+        +List price_history
+        +Decimal volatility_ewma
+        +float order_flow_imbalance
+        +on_trade(Dict)
+        +on_book_update(Dict)
+    }
+
+    MarketParticipant <|-- MarketMaker
+    MarketParticipant <|-- TrendFollower
+    MarketParticipant <|-- MeanReversionTrader
+    MarketParticipant <|-- NoiseTrader
+    MarketParticipant <|-- AggressiveTrader
+    MarketParticipant <|-- AlgorithmicTrader
+    MarketParticipant <|-- StopLossTrader
+    MarketParticipant <|-- OrderBookImbalanceTrader
+    MarketParticipant <|-- IcebergParticipant
+    MarketParticipant <|-- DirectionalTrader
+    MarketParticipant <|-- ChipCollector
+    MarketParticipant <|-- DayTrader
+    ParticipantRegistry --> MarketParticipant
+    MarketParticipant --> SharedMarketState
+```
+
+---
 
 ## 4. 数据流设计
 
-```
-Level-2 行情源
-     │
-     ├── 逐笔成交 ──→ TradeEvent ──→ MatchingEngine.consume_queue()
-     │                                    │
-     │                                    ├── 更新订单簿
-     │                                    ├── 生成成交记录
-     │                                    └── 推送状态变更
-     │
-     └── 盘口快照 ──→ QuoteEvent ──→ OrderBook.update_reference()
-                                          │
-                                          └── 更新最优价格、队列参考
+### 4.1 委托下单全流程
 
-外部委托
-     │
-     ├── 新委托 ──→ OrderEvent ──→ MatchingEngine.place_order()
-     │                                    │
-     │                                    ├── 价格交叉检测
-     │                                    ├── 立即撮合 / 入队
-     │                                    └── 返回订单状态
-     │
-     ├── 撤单 ──→ CancelEvent ──→ MatchingEngine.cancel_order()
-     │                                    │
-     │                                    └── 从队列移除
-     │
-     └── 查询 ──→ QueryEvent ──→ OrderBook.get_status()
-```
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as 客户端
+    participant API as FastAPI
+    participant Rules as MarketRules
+    participant AC as Account
+    participant Engine as SymbolMatchingEngine
+    participant OB as OrderBook
+    participant WS as WebSocket
+    participant DB as SQLite
 
-## 5. 状态机设计
-
-订单状态流转：
-
-```
-                    ┌──────────┐
-                    │  PENDING │  (创建中)
-                    └────┬─────┘
-                         │ 校验通过
-                    ┌────▼─────┐
-    ┌───────────────│  ACTIVE  │  (已激活)
-    │               └────┬─────┘
-    │                    │ 价格不交叉
-    │               ┌────▼─────┐
-    │    ┌─────────│  QUEUED  │  (排队中)
-    │    │ 撤单     └────┬─────┘
-    │    │          ┌────┴────┐
-    │    │          │ 行情触发 │
-    │    │          └────┬────┘
-    │    │               │ 价格交叉
-    │    │          ┌────▼─────┐
-    │    │          │  MATCHING│  (撮合中)
-    │    │          └────┬─────┘
-    │    │               │
-    │    │    ┌─────────┴─────────┐
-    │    │    │                   │
-    │    │    │ 部分成交           │ 全部成交
-    │    │    │                   │
-    │    │    ▼                   ▼
-    │    │ ┌──────────┐     ┌──────────┐
-    │    │ │  PARTIAL │     │  FILLED  │
-    │    │ └──────────┘     └──────────┘
-    │    │
-    │    ▼
-    │ ┌──────────┐
-    └─│ CANCELLED│
-      └──────────┘
+    Client->>API: POST /api/v1/orders
+    API->>Rules: validate_order(price, qty, benchmark)
+    alt 校验失败
+        Rules-->>API: (False, "价格超出价格笼子上限...")
+        API-->>Client: 400, reject_reason
+    else 校验通过
+        Rules-->>API: (True, "")
+        API->>AC: can_buy(price, qty) / can_sell(qty)
+        alt 风控失败
+            AC-->>API: False
+            API-->>Client: 400, "资金不足" / "仓位不足"
+        else 风控通过
+            AC-->>API: True
+            API->>Engine: place_order(Order)
+            Engine->>OB: place_order(Order)
+            alt 价格交叉
+                OB-->>Engine: trades, Order(FILLED/PARTIAL)
+                Engine->>AC: settle_buy / settle_sell
+                Engine->>DB: save_trade / save_order
+                Engine->>WS: broadcast_trade
+            else 价格不交叉
+                OB-->>Engine: [], Order(QUEUED)
+                Engine->>AC: freeze_buy / freeze_sell
+            end
+            Engine-->>API: Order
+            API-->>Client: 200, order_id + status
+        end
+    end
 ```
 
-## 6. 并发设计
+### 4.2 逐笔成交驱动队列消耗
 
-### 6.1 单标的串行处理
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Feed as MockLevel2Feed
+    participant Engine as SymbolMatchingEngine
+    participant OB as OrderBook
+    participant AC as Account
+    participant WS as WebSocket
+    participant DB as SQLite
 
-为保证撮合顺序性，每个标的 (symbol) 的撮合逻辑在独立的 asyncio 任务中串行执行：
-
-```python
-class SymbolMatchingLoop:
-    """单标的撮合循环"""
-    
-    async def run(self):
-        while self.running:
-            event = await self.event_queue.get()
-            # 串行处理：委托事件、逐笔成交事件、撤单事件
-            await self.process_event(event)
+    Feed->>Engine: process_trade(TradeEvent)
+    Engine->>OB: consume_queue_on_trade(trade)
+    OB->>OB: 遍历价格层级
+    loop 价格 <= 成交价（卖方队列）
+        OB->>OB: 按 FIFO 消耗订单
+        OB->>AC: settle_buy / settle_sell（被动方）
+        OB->>WS: broadcast_trade
+        OB->>DB: save_trade
+    end
+    OB-->>Engine: 被消耗订单列表
+    Engine->>Engine: 更新 queue_info
 ```
 
-### 6.2 跨标的并行处理
+### 4.3 行情生成与参与者交互
 
-不同标的之间完全独立，可以并行处理：
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Feed as MockLevel2Feed
+    participant Registry as ParticipantRegistry
+    participant P as MarketParticipant
+    participant Shared as SharedMarketState
+    participant Engine as SymbolMatchingEngine
+    participant OB as OrderBook
 
-```python
-class EngineManager:
-    """管理多个标的的撮合引擎"""
-    
-    def __init__(self):
-        self.engines: Dict[str, SymbolMatchingLoop] = {}
-    
-    async def route_event(self, symbol: str, event: Event):
-        """将事件路由到对应标的的引擎"""
-        if symbol not in self.engines:
-            self.engines[symbol] = SymbolMatchingLoop(symbol)
-        await self.engines[symbol].event_queue.put(event)
+    loop 每 tick
+        Feed->>Registry: get_participants()
+        Registry-->>Feed: 12 类参与者实例
+        Feed->>OB: get_orderbook_snapshot()
+        OB-->>Feed: 当前盘口
+        Feed->>Shared: on_book_update(snapshot)
+        loop 每个参与者
+            Feed->>P: generate_order(snapshot)
+            P->>Shared: 读取波动率 / 不平衡度
+            P-->>Feed: 订单 Dict
+            Feed->>Engine: place_order(订单)
+            Engine->>OB: 撮合 / 入队
+        end
+        Feed->>P: generate_cancel(snapshot)
+        P-->>Feed: 撤单 Dict
+        Feed->>Engine: cancel_order(撤单)
+    end
 ```
 
-## 7. API 设计
+---
 
-### 7.1 REST API
+## 5. 并发模型
 
-```
-POST /api/v1/orders
-    Body: {"symbol": "000001.SZ", "side": "buy", "price": 10.50, "quantity": 1000}
-    Response: {"order_id": "xxx", "status": "queued", "queue_length": 15, "queue_position": 15}
+### 5.1 单标的串行处理
 
-DELETE /api/v1/orders/{order_id}
-    Response: {"order_id": "xxx", "status": "cancelled"}
+每个标的拥有独立的 `SymbolMatchingEngine`，内部使用 `asyncio.Queue` + `asyncio.Task` 实现单线程事件循环：
 
-GET /api/v1/orders/{order_id}
-    Response: 订单详情
+```mermaid
+flowchart LR
+    subgraph Engine["SymbolMatchingEngine"]
+        direction TB
+        Queue["asyncio.Queue\n(事件队列)"]
+        Task["asyncio.Task\n(_run_loop)"]
+        Process["process_event()\n串行处理"]
+    end
 
-GET /api/v1/orders
-    Query: symbol, status, side
-    Response: 订单列表
+    Queue -->|get| Task
+    Task -->|process| Process
+    Process -->|put| Queue
 
-GET /api/v1/trades
-    Query: symbol, start_time, end_time
-    Response: 成交记录
-```
-
-### 7.2 WebSocket 实时推送
-
-```
-WS /ws/v1/market
-    → 订阅: {"action": "subscribe", "channel": "trades", "symbol": "000001.SZ"}
-    ← 推送: {"type": "trade", "symbol": "000001.SZ", "price": 10.50, "quantity": 500, ...}
-    
-WS /ws/v1/orders
-    → 订阅: {"action": "subscribe", "channel": "order_status", "order_id": "xxx"}
-    ← 推送: {"type": "status_change", "order_id": "xxx", "status": "filled", ...}
+    style Queue fill:#fefce8,stroke:#fde047
+    style Task fill:#f0fdf4,stroke:#86efac
+    style Process fill:#f0f9ff,stroke:#bae6fd
 ```
 
-## 8. 配置设计
+事件类型：
+- `order`: 新委托
+- `cancel`: 撤单
+- `trade`: 逐笔成交（驱动队列消耗）
+- `cancel_feed`: 行情撤单
+
+### 5.2 跨标的并行处理
+
+不同标的之间完全独立，由 `MatchingEngineManager` 路由：
+
+```mermaid
+flowchart TB
+    subgraph Manager["MatchingEngineManager"]
+        direction TB
+        Router["route_event(symbol, event)"]
+    end
+
+    subgraph Engine1["SymbolMatchingEngine: 000001.SZ"]
+        Queue1["Queue"]
+        Task1["Task"]
+    end
+
+    subgraph Engine2["SymbolMatchingEngine: 600519.SH"]
+        Queue2["Queue"]
+        Task2["Task"]
+    end
+
+    subgraph EngineN["SymbolMatchingEngine: ..."]
+        QueueN["Queue"]
+        TaskN["Task"]
+    end
+
+    Router -->|000001.SZ| Queue1
+    Router -->|600519.SH| Queue2
+    Router -->|...| QueueN
+
+    style Manager fill:#faf5ff,stroke:#d8b4fe
+    style Engine1 fill:#fefce8,stroke:#fde047
+    style Engine2 fill:#fefce8,stroke:#fde047
+    style EngineN fill:#fefce8,stroke:#fde047
+```
+
+### 5.3 同步机制
+
+`place_order` 使用 `asyncio.Future` 实现真正的异步等待（非轮询）：
+
+```mermaid
+flowchart LR
+    Client["place_order()"] -->|创建 Future| Future["asyncio.Future"]
+    Client -->|put event| Queue["Event Queue"]
+    Queue -->|get| Loop["Event Loop"]
+    Loop -->|处理完成| SetResult["future.set_result()"]
+    SetResult -->|唤醒| Future
+    Future -->|返回| Client
+
+    style Client fill:#f0f9ff,stroke:#bae6fd
+    style Future fill:#f0fdf4,stroke:#86efac
+    style Queue fill:#fefce8,stroke:#fde047
+```
+
+---
+
+## 6. 配置设计
 
 ```yaml
 engine:
   symbols:
     - "000001.SZ"
     - "600519.SH"
-  
+
   level2_feed:
     source: "mock"  # mock / tencent / sina / custom
     trade_topic: "trade"
     quote_topic: "quote"
-  
+
   matching:
     price_tick: 0.01          # 最小价格变动单位
     lot_size: 100             # 最小交易单位
     max_queue_depth: 10000    # 最大队列深度
-  
+
+  market_rules:
+    previous_close: 10.50     # 昨收价
+    market_type: "main_board" # main_board / st_board / star_market / chinext / bse
+
+  latency:
+    default_ms: 0
+    internal_ms: 0
+    external_ms: 0
+
   api:
     host: "0.0.0.0"
     port: 8000
-    
+
   logging:
     level: "INFO"
     format: "json"
 ```
 
-## 9. 性能指标
+---
 
-| 指标 | 目标 | 说明 |
-|---|---|---|
-| 委托处理延迟 | < 1ms | 从接收到入队/撮合 |
-| 逐笔响应延迟 | < 1ms | 逐笔成交到队列消耗 |
-| 单标吞吐量 | > 10000 笔/秒 | 逐笔成交处理 |
-| 并发标的数 | > 1000 | 同时监控的标的数 |
-| 内存占用 | < 1GB/1000标的 | 订单簿内存占用 |
+## 7. 扩展性设计
 
-## 10. 扩展性设计
-
-- **新标的接入**：动态创建 SymbolMatchingLoop，无需重启
-- **新行情源**：实现 Level2FeedHandler 接口即可接入
-- **持久化**：可选 Redis 后端，支持重启恢复订单簿状态
-- **集群扩展**：通过消息队列（Kafka/RabbitMQ）分发行情到多个撮合节点
+| 扩展点 | 方案 | 状态 |
+|--------|------|------|
+| 新标的接入 | 动态创建 SymbolMatchingEngine，无需重启 | ✅ 已实现 |
+| 新行情源 | 实现 Level2FeedHandler 接口 | ⏳ 预留 |
+| 新参与者类型 | 继承 MarketParticipant，注册到 ParticipantRegistry | ✅ 已实现 |
+| 持久化后端 | 当前 SQLite，可扩展 Redis / PostgreSQL | ⏳ 预留 |
+| 集群部署 | 通过消息队列（Kafka / RabbitMQ）分发行情 | ⏳ 预留 |
+| 监控告警 | Prometheus / Grafana 指标暴露 | ⏳ 预留 |
